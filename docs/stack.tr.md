@@ -8,7 +8,7 @@ Tarih: 2026-09-15
 
 - Web + API: Axum (Rust), `/v1/` altında REST. Askama + HTMX ile server-render, Node yok. Tek repo, tek binary. Bot sonradan aynı endpointleri kullanır.
 - DB: Postgres + sqlx. Row-lock takas transaction + outbox tablosu. `embedding` şimdilik JSONB placeholder; gerçek pgvector kolonu C fazıyla gelir.
-- Auth: email magic link — PLANLANDI, henüz yok (MVP'de tüm endpointler açık).
+- Auth: email magic link YAPILDI (15dk tek-kullanımlık token, HMAC session, varsayılan LogMailer / SMTP_URL ile SMTP). Takas, report ve profil login ister; bırakma açık.
 - Ses depolama: MVP'de local `./data/voice`, static serve ile `voice_url`. S3 kurulumu yok. API değişmeden sonradan S3-uyumluya taşınır.
 - Deploy: Docker tek binary + Fly.io (herhangi bir Docker host olur).
 - API sözleşmesi: [openapi.yaml](./openapi.yaml) (elde yazıldı, kodu aynalar), RFC 9457 hatalar, swap'te `Idempotency-Key`, cursor sayfalama.

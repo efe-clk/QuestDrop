@@ -32,13 +32,13 @@ pub struct ValidatedDrop {
     pub energy: String,
 }
 
-fn valid_handle(h: &str) -> bool {
+pub fn valid_handle(h: &str) -> bool {
     (3..=24).contains(&h.len())
         && h.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-fn valid_email(e: &str) -> bool {
+pub fn valid_email(e: &str) -> bool {
     if e.len() > 254 || e.len() < 5 {
         return false;
     }

@@ -15,6 +15,7 @@ use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer, timeout
 use tracing::warn;
 
 use crate::{
+    auth::{self, COOKIE_NAME},
     db::{self, DbError},
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
@@ -25,6 +26,8 @@ use crate::{
 pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
     pub voice_dir: std::path::PathBuf,
+    pub session_secret: Vec<u8>,
+    pub mailer: std::sync::Arc<dyn auth::Mailer>,
 }
 
 #[derive(Template)]
@@ -250,6 +253,7 @@ async fn create_project(
 
 async fn upsert_profile(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     raw: Result<Json<RawProfile>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Some(pool) = &s.pool else {
@@ -268,6 +272,35 @@ async fn upsert_profile(
                 .into_response();
         }
     };
+    // Profiles are identity writes: the session owner may only edit itself.
+    let actor = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    match sqlx::query("SELECT handle, email FROM users WHERE id = $1")
+        .bind(actor)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(r)) => {
+            use sqlx::Row;
+            let (h, e) = (
+                r.try_get::<String, _>("handle").unwrap_or_default(),
+                r.try_get::<String, _>("email").unwrap_or_default(),
+            );
+            if h != valid.handle || e != valid.email {
+                return problem(
+                    StatusCode::FORBIDDEN,
+                    "profile does not match the logged-in user",
+                )
+                .into_response();
+            }
+        }
+        Ok(None) => {
+            return problem(StatusCode::NOT_FOUND, "unknown user").into_response();
+        }
+        Err(e) => return db_error(DbError::Db(e)),
+    }
     match db::upsert_profile(pool, &valid).await {
         Ok(user_id) => Json(serde_json::json!({ "user_id": user_id })).into_response(),
         Err(e) => db_error(e),
@@ -336,6 +369,17 @@ async fn create_swap(
             return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
         }
     };
+    let actor = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if raw.taker_id != actor {
+        return problem(
+            StatusCode::FORBIDDEN,
+            "taker_id does not match the logged-in user",
+        )
+        .into_response();
+    }
     let key: Option<String> = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -405,6 +449,7 @@ async fn revive(
 
 async fn create_report(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     raw: Result<Json<RawReport>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Some(pool) = &s.pool else {
@@ -422,6 +467,17 @@ async fn create_report(
             return problem_errors(StatusCode::BAD_REQUEST, "invalid report", errs).into_response();
         }
     };
+    let actor = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if valid.reporter_id != actor {
+        return problem(
+            StatusCode::FORBIDDEN,
+            "reporter_id does not match the logged-in user",
+        )
+        .into_response();
+    }
     match db::create_report(pool, valid.reporter_id, valid.project_id, &valid.reason).await {
         Ok((report_id, hidden)) => (
             StatusCode::CREATED,
@@ -432,7 +488,140 @@ async fn create_report(
     }
 }
 
-/// 10 writes/min per IP on the write endpoints (spam-flood guard until auth).
+/// Session identity (or 401/503). Swaps, reports and profile edits carry
+/// value or moderation weight, so they require it; drops stay open intake.
+async fn session_user(
+    s: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<uuid::Uuid, Box<Response>> {
+    fn unauthorized() -> Box<Response> {
+        Box::new(problem(StatusCode::UNAUTHORIZED, "login required").into_response())
+    }
+    let Some(pool) = &s.pool else {
+        return Err(Box::new(
+            problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
+        ));
+    };
+    let cookie = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| {
+            c.split(';').find_map(|p| {
+                let (k, v) = p.split_once('=')?;
+                (k.trim() == COOKIE_NAME).then(|| v.trim().to_string())
+            })
+        });
+    let Some(value) = cookie else {
+        return Err(unauthorized());
+    };
+    match auth::load_session_user(pool, &s.session_secret, &value).await {
+        Ok(Some(uid)) => Ok(uid),
+        Ok(None) => Err(unauthorized()),
+        Err(e) => Err(Box::new(db_error(DbError::Db(e)))),
+    }
+}
+
+#[derive(Deserialize)]
+struct AuthRequest {
+    email: Option<String>,
+    handle: Option<String>,
+}
+
+async fn auth_request(State(s): State<AppState>, Json(raw): Json<AuthRequest>) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let email = raw.email.unwrap_or_default().trim().to_lowercase();
+    let mut errs = Vec::new();
+    if email.is_empty() || !crate::validate::valid_email(&email) {
+        errs.push("email is invalid".into());
+    }
+    if let Some(h) = raw.handle.as_deref() {
+        if !crate::validate::valid_handle(h.trim()) {
+            errs.push("handle must be 3-24 chars: lowercase letters, digits, underscore".into());
+        }
+    }
+    if !errs.is_empty() {
+        return problem_errors(StatusCode::BAD_REQUEST, "invalid request", errs).into_response();
+    }
+    let handle = raw.handle.map(|h| h.trim().to_string());
+    let token = match auth::issue_magic_token(pool, &email, handle.as_deref()).await {
+        Ok(t) => t,
+        Err(_) => {
+            return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+                .into_response();
+        }
+    };
+    let link = auth::login_link(&token);
+    if let Err(e) = s.mailer.send_login_link(&email, &link).await {
+        tracing::error!(error = %e, "mailer failed");
+    }
+    Json(serde_json::json!({ "sent": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct AuthCallback {
+    token: Option<String>,
+}
+
+async fn auth_callback(State(s): State<AppState>, Json(raw): Json<AuthCallback>) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let Some(token) = raw
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return problem(StatusCode::UNAUTHORIZED, "token is required").into_response();
+    };
+    let user = match auth::consume_magic_token(pool, token).await {
+        Ok(u) => u,
+        Err(auth::AuthError::Invalid) => {
+            return problem(StatusCode::UNAUTHORIZED, "invalid or expired token").into_response();
+        }
+        Err(auth::AuthError::Db(e)) => return db_error(DbError::Db(e)),
+    };
+    let value = match auth::create_session(pool, &s.session_secret, user).await {
+        Ok(v) => v,
+        Err(e) => return db_error(DbError::Db(e)),
+    };
+    let mut res = (StatusCode::OK, Json(serde_json::json!({ "user_id": user }))).into_response();
+    if let Ok(v) = HeaderValue::from_str(&format!(
+        "{COOKIE_NAME}={value}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"
+    )) {
+        res.headers_mut().append(header::SET_COOKIE, v);
+    }
+    res
+}
+
+async fn me(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let uid = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    match sqlx::query("SELECT handle, email FROM users WHERE id = $1")
+        .bind(uid)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(r)) => {
+            use sqlx::Row;
+            Json(serde_json::json!({
+                "user_id": uid,
+                "handle": r.try_get::<String, _>("handle").unwrap_or_default(),
+                "email": r.try_get::<String, _>("email").unwrap_or_default(),
+            }))
+            .into_response()
+        }
+        Ok(None) => problem(StatusCode::NOT_FOUND, "unknown user").into_response(),
+        Err(e) => db_error(DbError::Db(e)),
+    }
+}
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
     conn: Option<ConnectInfo<SocketAddr>>,
@@ -476,17 +665,27 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     let profile_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let swap_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let report_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let auth_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let voice_dir = std::path::PathBuf::from(
         std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
     );
     let state = AppState {
         pool,
         voice_dir: voice_dir.clone(),
+        session_secret: auth::session_secret(),
+        mailer: std::sync::Arc::from(auth::mailer_from_env()),
     };
     let router = Router::new()
         .route("/", get(index))
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route(
+            "/v1/auth/request",
+            post(auth_request)
+                .route_layer(middleware::from_fn_with_state(auth_limiter, posts_limit)),
+        )
+        .route("/v1/auth/callback", post(auth_callback))
+        .route("/v1/me", get(me))
         .route("/v1/projects", get(list_projects))
         .route(
             "/v1/projects",

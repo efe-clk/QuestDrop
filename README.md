@@ -50,12 +50,15 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 | GET | `/`, `/health`, `/ready` | home, liveness+db, readiness probe |
 | GET | `/v1/projects?cursor=&limit=` | OPEN pool, cursor pages (max 50) |
 | POST | `/v1/projects` | drop: validation, 3/day, 10/min per IP |
-| POST | `/v1/users/upsert` | skill profile for matching |
+| POST | `/v1/users/upsert` | skill profile for matching (login) |
 | GET | `/v1/match?user_id=` | top-3 + 1 surprise (RuleMatcher) |
-| POST | `/v1/swaps` | atomic take; `Idempotency-Key` optional |
+| POST | `/v1/swaps` | atomic take; `Idempotency-Key` optional (login) |
 | GET | `/v1/revive?user_id=` | freeze package + first 2-min task |
-| POST | `/v1/reports` | 3 distinct reports auto-hide |
+| POST | `/v1/reports` | 3 distinct reports auto-hide (login) |
 | GET | `/voice/*` | local mp3 files |
+| POST | `/v1/auth/request` | magic-link email (15-min token) |
+| POST | `/v1/auth/callback` | redeem token → HttpOnly session cookie |
+| GET | `/v1/me` | session identity (401 without cookie) |
 
 ## Quickstart (5 min)
 

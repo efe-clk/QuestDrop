@@ -294,6 +294,7 @@ async fn profile_upsert_drives_match_fit() {
     let app = build_app(Some(pool.clone()));
 
     // Skills profile first: B can do rust, A posts a rust quest.
+    let ck_b = login(&app, &pool, "fitb@x.com", Some("fitter_b")).await;
     let res = app
         .clone()
         .oneshot(
@@ -301,6 +302,7 @@ async fn profile_upsert_drives_match_fit() {
                 .method("POST")
                 .uri("/v1/users/upsert")
                 .header("content-type", "application/json")
+                .header("cookie", format!("qd_session={ck_b}"))
                 .body(Body::from(
                     serde_json::json!({
                         "handle": "fitter_b", "email": "fitb@x.com",
@@ -339,7 +341,7 @@ async fn profile_upsert_drives_match_fit() {
     // fit = (overlap(can_do=[rust],[rust]) + overlap([],[rust])) / 2 = 0.50
     assert!(items[0]["reason"].as_str().unwrap().starts_with("fit=0.50"));
 
-    // Same email + different handle stays 409 on profiles too.
+    // Same email + different handle with B's session -> 403, not a takeover.
     let res = app
         .clone()
         .oneshot(
@@ -347,6 +349,7 @@ async fn profile_upsert_drives_match_fit() {
                 .method("POST")
                 .uri("/v1/users/upsert")
                 .header("content-type", "application/json")
+                .header("cookie", format!("qd_session={ck_b}"))
                 .body(Body::from(
                     serde_json::json!({
                         "handle": "impostor", "email": "fitb@x.com",
@@ -358,7 +361,27 @@ async fn profile_upsert_drives_match_fit() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // No session at all -> 401.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/upsert")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "fitter_b", "email": "fitb@x.com",
+                        "can_do": [], "looking_for": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -409,6 +432,7 @@ async fn post_swap(
     app: &axum::Router,
     body: serde_json::Value,
     key: Option<&str>,
+    cookie: Option<&str>,
 ) -> (StatusCode, serde_json::Value, bool) {
     let mut b = Request::builder()
         .method("POST")
@@ -416,6 +440,9 @@ async fn post_swap(
         .header("content-type", "application/json");
     if let Some(k) = key {
         b = b.header("idempotency-key", k);
+    }
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("qd_session={c}"));
     }
     let res = app
         .clone()
@@ -427,6 +454,37 @@ async fn post_swap(
     let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
     (status, json, replayed)
+}
+
+/// Full login loop: db-issued token (LogMailer in tests) redeemed over HTTP.
+/// Returns the raw session cookie value.
+async fn login(app: &axum::Router, pool: &PgPool, email: &str, handle: Option<&str>) -> String {
+    let raw = questdrop::auth::issue_magic_token(pool, email, handle)
+        .await
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/callback")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"token":"{raw}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let set = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set.starts_with("qd_session="), "HttpOnly session cookie");
+    assert!(set.contains("HttpOnly"));
+    set.split(';').next().unwrap()["qd_session=".len()..].to_string()
 }
 
 fn swap_json(taker: &str, give: &str, take: &str) -> serde_json::Value {
@@ -483,8 +541,15 @@ async fn swap_201_freezes_both_sides() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s1").await;
+    let ck_b = login(&app, &pool, "swbs1@x.com", None).await;
 
-    let (s, json, replayed) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    let (s, json, replayed) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED, "body: {json}");
     assert!(!replayed);
     assert!(json.get("match_id").is_some());
@@ -508,8 +573,15 @@ async fn swap_double_claim_409() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s2").await;
+    let ck_b = login(&app, &pool, "swbs2@x.com", None).await;
 
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     // Same take again with a fresh giver -> taken already.
     let (s, _) = post_drop(&app, drop_json("sw_c_s2", "swcs2@x.com", "C quest")).await;
@@ -524,10 +596,23 @@ async fn swap_double_claim_409() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (s, _, _) = post_swap(&app, swap_json(&uid_c, &offer_c, &offer_a), None).await;
+    let ck_c = login(&app, &pool, "swcs2@x.com", None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_c, &offer_c, &offer_a),
+        None,
+        Some(&ck_c),
+    )
+    .await;
     assert_eq!(s, StatusCode::CONFLICT);
     // Replaying your own matched give -> also 409.
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
 
@@ -538,11 +623,13 @@ async fn swap_replay_returns_stored_200() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s3").await;
+    let ck_b = login(&app, &pool, "swbs3@x.com", None).await;
 
     let (s1, j1, r1) = post_swap(
         &app,
         swap_json(&uid_b, &offer_b, &offer_a),
         Some("key-s3-abc"),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s1, StatusCode::CREATED);
@@ -551,6 +638,7 @@ async fn swap_replay_returns_stored_200() {
         &app,
         swap_json(&uid_b, &offer_b, &offer_a),
         Some("key-s3-abc"),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s2, StatusCode::OK);
@@ -570,25 +658,41 @@ async fn swap_rules_4xx() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s4").await;
+    let ck_b = login(&app, &pool, "swbs4@x.com", None).await;
 
     // give == take
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_b), None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_b),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CONFLICT);
     // give is not yours
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_a, &offer_b), None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_a, &offer_b),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CONFLICT);
-    // unknown taker / unknown offer
+    // session user wins over body ids: unknown taker in body -> 403, not 404.
     let (s, _, _) = post_swap(
         &app,
         swap_json("00000000-0000-0000-0000-000000000000", &offer_b, &offer_a),
         None,
+        Some(&ck_b),
     )
     .await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // unknown offer still 404 (actor matches).
     let (s, _, _) = post_swap(
         &app,
         swap_json(&uid_b, &offer_b, "00000000-0000-0000-0000-000000000000"),
         None,
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -597,9 +701,13 @@ async fn swap_rules_4xx() {
         &app,
         swap_json(&uid_b, &offer_b, &offer_a),
         Some(&"k".repeat(65)),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    // no session at all -> 401.
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -613,8 +721,10 @@ async fn swap_race_single_winner() {
     let mut giver_offers = Vec::new();
     for i in 0..5 {
         let h = format!("racer_s5_{i}");
-        let (s, _) = post_drop(&app, drop_json(&h, &format!("rs5{i}@x.com"), "Racer")).await;
+        let em = format!("rs5{i}@x.com");
+        let (s, _) = post_drop(&app, drop_json(&h, &em, "Racer")).await;
         assert_eq!(s, StatusCode::CREATED);
+        let ck = login(&app, &pool, &em, None).await;
         let uid: String =
             sqlx::query_scalar(&format!("SELECT id::text FROM users WHERE handle='{h}'"))
                 .fetch_one(&pool)
@@ -626,14 +736,14 @@ async fn swap_race_single_winner() {
         .fetch_one(&pool)
         .await
         .unwrap();
-        giver_offers.push((uid, offer));
+        giver_offers.push((uid, offer, ck));
     }
     let mut tasks = Vec::new();
-    for (uid, offer) in giver_offers {
+    for (uid, offer, ck) in giver_offers {
         let app = app.clone();
         let take = offer_a.clone();
         tasks.push(tokio::spawn(async move {
-            post_swap(&app, swap_json(&uid, &offer, &take), None)
+            post_swap(&app, swap_json(&uid, &offer, &take), None, Some(&ck))
                 .await
                 .0
         }));
@@ -654,17 +764,18 @@ async fn swap_race_single_winner() {
 async fn post_report(
     app: &axum::Router,
     body: serde_json::Value,
+    cookie: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/v1/reports")
+        .header("content-type", "application/json");
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("qd_session={c}"));
+    }
     let res = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/reports")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(b.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let status = res.status();
@@ -673,7 +784,7 @@ async fn post_report(
     (status, json)
 }
 
-async fn upsert(app: &axum::Router, handle: &str, email: &str) -> String {
+async fn upsert(app: &axum::Router, handle: &str, email: &str, cookie: &str) -> String {
     let res = app
         .clone()
         .oneshot(
@@ -681,6 +792,7 @@ async fn upsert(app: &axum::Router, handle: &str, email: &str) -> String {
                 .method("POST")
                 .uri("/v1/users/upsert")
                 .header("content-type", "application/json")
+                .header("cookie", format!("qd_session={cookie}"))
                 .body(
                     Body::from(
                         serde_json::json!({"handle": handle, "email": email, "can_do": [], "looking_for": []})
@@ -716,38 +828,44 @@ async fn third_report_hides_project() {
     .unwrap();
     let mk = |uid: &str| serde_json::json!({"reporter_id": uid, "project_id": project, "reason": "This looks like spam content here"});
 
-    let uid_b = upsert(&app, "rep_b", "repb@x.com").await;
-    let (s, j) = post_report(&app, mk(&uid_b)).await;
+    let ck_b = login(&app, &pool, "repb@x.com", Some("rep_b")).await;
+    let uid_b = upsert(&app, "rep_b", "repb@x.com", &ck_b).await;
+    let (s, j) = post_report(&app, mk(&uid_b), Some(&ck_b)).await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(j["hidden"], false);
     // Duplicate + own-report + unknown ids + short reason.
-    let (s, _) = post_report(&app, mk(&uid_b)).await;
+    let (s, _) = post_report(&app, mk(&uid_b), Some(&ck_b)).await;
     assert_eq!(s, StatusCode::CONFLICT);
     let uid_a: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='rep_a'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let (s, _) = post_report(&app, mk(&uid_a)).await;
+    let ck_a = login(&app, &pool, "repa@x.com", None).await;
+    let (s, _) = post_report(&app, mk(&uid_a), Some(&ck_a)).await;
     assert_eq!(s, StatusCode::CONFLICT);
     let (s, _) = post_report(
         &app,
         serde_json::json!({"reporter_id": "00000000-0000-0000-0000-000000000000", "project_id": project, "reason": "This looks like spam content here"}),
+        Some(&ck_b),
     )
     .await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s, StatusCode::FORBIDDEN);
     let (s, j) = post_report(
         &app,
         serde_json::json!({"reporter_id": uid_b, "project_id": project, "reason": "short"}),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(j["errors"].is_array());
 
-    let uid_c = upsert(&app, "rep_c", "repc@x.com").await;
-    let uid_d = upsert(&app, "rep_d", "repd@x.com").await;
-    let (s, _) = post_report(&app, mk(&uid_c)).await;
+    let ck_c = login(&app, &pool, "repc@x.com", Some("rep_c")).await;
+    let uid_c = upsert(&app, "rep_c", "repc@x.com", &ck_c).await;
+    let ck_d = login(&app, &pool, "repd@x.com", Some("rep_d")).await;
+    let uid_d = upsert(&app, "rep_d", "repd@x.com", &ck_d).await;
+    let (s, _) = post_report(&app, mk(&uid_c), Some(&ck_c)).await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, j) = post_report(&app, mk(&uid_d)).await;
+    let (s, j) = post_report(&app, mk(&uid_d), Some(&ck_d)).await;
     assert_eq!(s, StatusCode::CREATED);
     assert_eq!(j["hidden"], true);
 
@@ -771,7 +889,7 @@ async fn third_report_hides_project() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (s, _, _) = post_swap(&app, swap_json(&uid_c, &offer, &offer), None).await;
+    let (s, _, _) = post_swap(&app, swap_json(&uid_c, &offer, &offer), None, Some(&ck_c)).await;
     assert_ne!(s, StatusCode::CREATED);
 }
 
@@ -782,7 +900,14 @@ async fn revive_returns_package_and_task() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "rv").await;
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    let ck_b = login(&app, &pool, "swbrv@x.com", None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     // Same taker takes again: history keeps both revives, newest first.
     let (s, _) = post_drop(&app, drop_json("sw_c_rv", "swcrv@x.com", "Second")).await;
@@ -801,7 +926,13 @@ async fn revive_returns_package_and_task() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b2, &offer_c), None).await;
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b2, &offer_c),
+        None,
+        Some(&ck_b),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
 
     let res = app
@@ -853,6 +984,7 @@ async fn swap_key_reuse_with_different_params_400() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s6").await;
+    let ck_b = login(&app, &pool, "swbs6@x.com", None).await;
     let (s, _) = post_drop(&app, drop_json("sw_c_s6", "swcs6@x.com", "C quest")).await;
     assert_eq!(s, StatusCode::CREATED);
     let offer_c: String = sqlx::query_scalar(
@@ -866,6 +998,7 @@ async fn swap_key_reuse_with_different_params_400() {
         &app,
         swap_json(&uid_b, &offer_b, &offer_a),
         Some("key-s6-dup"),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s1, StatusCode::CREATED);
@@ -874,6 +1007,7 @@ async fn swap_key_reuse_with_different_params_400() {
         &app,
         swap_json(&uid_b, &offer_b, &offer_c),
         Some("key-s6-dup"),
+        Some(&ck_b),
     )
     .await;
     assert_eq!(s2, StatusCode::BAD_REQUEST);
@@ -916,14 +1050,16 @@ async fn same_key_race_executes_once() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s8").await;
+    let ck_b = login(&app, &pool, "swbs8@x.com", None).await;
     let body = swap_json(&uid_b, &offer_b, &offer_a);
 
     let mut tasks = Vec::new();
     for _ in 0..5 {
         let app = app.clone();
         let body = body.clone();
+        let ck = ck_b.clone();
         tasks.push(tokio::spawn(async move {
-            post_swap(&app, body, Some("key-s8-race")).await
+            post_swap(&app, body, Some("key-s8-race"), Some(&ck)).await
         }));
     }
     let mut fresh = 0;
@@ -1048,6 +1184,117 @@ async fn match_embedding_algo_is_deterministic() {
     assert_eq!(s, StatusCode::OK);
     let (s, _) = get(format!("/v1/match?user_id={uid}&algo=nope")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn auth_request_callback_me_loop() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    // Request accepts new identity, rejects garbage.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/request")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"email":"newbie@x.com","handle":"newbie"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/request")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"email":"nope"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Callback redeems once; replay and garbage fail.
+    let raw = questdrop::auth::issue_magic_token(&pool, "newbie@x.com", Some("newbie"))
+        .await
+        .unwrap();
+    let cb_app = app.clone();
+    let cb = move |tok: String| {
+        let app = cb_app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/callback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"token":"{tok}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let res = cb(raw.clone()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let cookie = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.starts_with("qd_session="));
+    assert_eq!(cb(raw).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        cb("garbage-token".into()).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // /v1/me with and without the session.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/me")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let session = cookie.split(';').next().unwrap().to_string();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/me")
+                .header("cookie", session)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), 65536).await.unwrap();
+    let me: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(me["handle"], "newbie");
+    assert_eq!(me["email"], "newbie@x.com");
+
+    // Expired token is dead.
+    let raw2 = questdrop::auth::issue_magic_token(&pool, "old@x.com", None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE magic_tokens SET expires_at = now() - interval '1 min'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cb(raw2).await.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

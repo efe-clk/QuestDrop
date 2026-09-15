@@ -8,6 +8,49 @@ info:
 servers:
   - url: http://localhost:3000
 paths:
+  /v1/auth/request:
+    post:
+      summary: Request a magic-link email (15-min token, LogMailer unless SMTP_URL set)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: {type: string}
+                handle: {type: string}
+      responses:
+        '200':
+          description: sent flag (always true, no existence leak)
+        '400':
+          $ref: '#/components/responses/Problem'
+  /v1/auth/callback:
+    post:
+      summary: Redeem a token for an HttpOnly session cookie (single-use)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: {type: string}
+      responses:
+        '200':
+          description: user_id + Set-Cookie
+        '401':
+          $ref: '#/components/responses/Problem'
+  /v1/me:
+    get:
+      summary: Session identity (401 without a valid cookie)
+      responses:
+        '200':
+          description: user_id, handle, email
+        '401':
+          $ref: '#/components/responses/Problem'
   /:
     get:
       summary: Home page (Askama HTML with pool count)
@@ -68,7 +111,7 @@ paths:
           $ref: '#/components/responses/Problem'
   /v1/users/upsert:
     post:
-      summary: Create or update a skill profile (drives match fit)
+      summary: Create or update OWN skill profile, LOGIN REQUIRED
       requestBody:
         required: true
         content:
@@ -96,7 +139,7 @@ paths:
           $ref: '#/components/responses/Problem'
   /v1/swaps:
     post:
-      summary: Atomic take (both sides OPEN→MATCHED + match row + outbox)
+      summary: Atomic take, LOGIN REQUIRED (taker_id must equal session user)
       parameters:
         - name: Idempotency-Key
           in: header
@@ -134,7 +177,7 @@ paths:
           $ref: '#/components/responses/Problem'
   /v1/reports:
     post:
-      summary: Report a project (3 distinct reports auto-hide it)
+      summary: Report a project, LOGIN REQUIRED (reporter must equal session user)
       requestBody:
         required: true
         content:
