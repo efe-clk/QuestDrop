@@ -17,12 +17,17 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     DB_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-async fn test_pool() -> Option<PgPool> {
+async fn test_pool() -> PgPool {
+    // Safety: tests TRUNCATE every table. Only a throwaway DB whose name
+    // contains "test" is accepted — never dev/prod.
     let url = std::env::var("TEST_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
+        .expect("TEST_DATABASE_URL must be set (e.g. .../questdrop_test)");
+    if !url.to_lowercase().contains("test") {
+        panic!("refusing to run destructive tests against non-test database");
+    }
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(3))
         .connect(&url)
         .await
         .expect("test database must be reachable");
@@ -30,7 +35,7 @@ async fn test_pool() -> Option<PgPool> {
         .run(&pool)
         .await
         .expect("migrations must apply");
-    Some(pool)
+    pool
 }
 
 async fn clean(pool: &PgPool) {
@@ -79,10 +84,7 @@ async fn post_drop(
 #[tokio::test]
 async fn drop_201_freezes_offer_and_outbox() {
     let _g = lock();
-    let Some(pool) = test_pool().await else {
-        eprintln!("SKIP: TEST_DATABASE_URL unset");
-        return;
-    };
+    let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
@@ -115,10 +117,7 @@ async fn drop_201_freezes_offer_and_outbox() {
 #[tokio::test]
 async fn invalid_drop_400_with_errors() {
     let _g = lock();
-    let Some(pool) = test_pool().await else {
-        eprintln!("SKIP: TEST_DATABASE_URL unset");
-        return;
-    };
+    let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
 
@@ -134,10 +133,7 @@ async fn invalid_drop_400_with_errors() {
 #[tokio::test]
 async fn fourth_drop_per_day_429() {
     let _g = lock();
-    let Some(pool) = test_pool().await else {
-        eprintln!("SKIP: TEST_DATABASE_URL unset");
-        return;
-    };
+    let pool = test_pool().await;
     clean(&pool).await;
     // Fresh app per request would reset the IP limiter; one app for all 4 posts.
     let app = build_app(Some(pool));
@@ -152,10 +148,7 @@ async fn fourth_drop_per_day_429() {
 #[tokio::test]
 async fn email_handle_mismatch_409() {
     let _g = lock();
-    let Some(pool) = test_pool().await else {
-        eprintln!("SKIP: TEST_DATABASE_URL unset");
-        return;
-    };
+    let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
     let (s, _) = post_drop(&app, drop_json("carol_5", "carol5@x.com", "First")).await;
@@ -168,10 +161,7 @@ async fn email_handle_mismatch_409() {
 #[tokio::test]
 async fn pool_paginates_with_cursor() {
     let _g = lock();
-    let Some(pool) = test_pool().await else {
-        eprintln!("SKIP: TEST_DATABASE_URL unset");
-        return;
-    };
+    let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
     for i in 1..=3 {
@@ -195,6 +185,30 @@ async fn pool_paginates_with_cursor() {
     let p2 = get(format!("/v1/projects?limit=2&cursor={cursor}")).await;
     assert_eq!(p2["pool"].as_array().unwrap().len(), 1);
     assert!(p2.get("next_cursor").unwrap().is_null());
+}
+
+#[tokio::test]
+async fn malformed_json_is_rfc9457() {
+    let _g = lock();
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/projects")
+                .header("content-type", "application/json")
+                .body(Body::from("{bad json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(res.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["status"], 400);
+    assert!(json.get("title").is_some());
 }
 
 #[tokio::test]

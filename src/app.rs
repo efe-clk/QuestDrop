@@ -37,11 +37,6 @@ struct IndexTemplate {
 }
 
 #[derive(Serialize)]
-struct Health {
-    status: &'static str,
-}
-
-#[derive(Serialize)]
 pub struct Problem {
     #[serde(rename = "type")]
     type_: &'static str,
@@ -85,11 +80,19 @@ fn problem_errors(
 fn db_error(e: DbError) -> Response {
     match e {
         DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
-        DbError::DailyCap => problem(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!("max {} drops per day", db::MAX_DROPS_PER_DAY),
-        )
-        .into_response(),
+        DbError::DailyCap => {
+            // Seconds until UTC midnight, when the quota resets.
+            let retry = 86_400 - chrono::Utc::now().timestamp() % 86_400;
+            let (status, body) = problem(
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("max {} drops per day", db::MAX_DROPS_PER_DAY),
+            );
+            let mut res = (status, body).into_response();
+            if let Ok(v) = HeaderValue::from_str(&retry.to_string()) {
+                res.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            res
+        }
         DbError::Db(inner) => {
             // Never leak driver internals to clients; full error goes to logs.
             tracing::error!(error = %inner, "database failure");
@@ -112,8 +115,15 @@ async fn index(State(s): State<AppState>) -> Response {
     }
 }
 
-async fn health() -> impl IntoResponse {
-    Json(Health { status: "ok" })
+async fn health(State(s): State<AppState>) -> impl IntoResponse {
+    let db = match &s.pool {
+        Some(p) => match sqlx::query("SELECT 1 AS one").fetch_one(p).await {
+            Ok(_) => "up",
+            Err(_) => "down",
+        },
+        None => "down",
+    };
+    Json(serde_json::json!({ "status": "ok", "db": db }))
 }
 
 #[derive(Deserialize)]
@@ -148,9 +158,19 @@ async fn match_pool(Query(_q): Query<MatchQuery>) -> Response {
     Json(serde_json::json!({ "matches": [] })).into_response()
 }
 
-async fn create_project(State(s): State<AppState>, Json(raw): Json<RawDrop>) -> Response {
+async fn create_project(
+    State(s): State<AppState>,
+    raw: Result<Json<RawDrop>, axum::extract::rejection::JsonRejection>,
+) -> Response {
     let Some(pool) = &s.pool else {
         return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    // Malformed JSON gets the same RFC 9457 shape as validation errors.
+    let raw = match raw {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
+        }
     };
     let valid = match validate_drop(&raw) {
         Ok(v) => v,
@@ -237,14 +257,29 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+    if std::env::var("RUST_LOG").is_err() {
+        // Empty EnvFilter silences everything; default to warn so degraded
+        // mode (DB down) is always visible in logs.
+        std::env::set_var("RUST_LOG", "questdrop=warn,tower_http=warn");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    dotenvy::dotenv().ok();
 
     let pool = match std::env::var("DATABASE_URL") {
         Ok(url) => match PgPoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(Duration::from_secs(3))
+            .idle_timeout(Some(Duration::from_secs(60)))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("SET statement_timeout = '5s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(&url)
             .await
         {
@@ -279,6 +314,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         listener,
         build_app(pool).into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = term.recv() => {},
+            _ = tokio::signal::ctrl_c() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }

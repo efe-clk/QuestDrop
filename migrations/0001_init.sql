@@ -1,7 +1,7 @@
 -- QuestDrop Phase 0/1 schema. Mirrors the frozen design doc.
 -- pgvector embedding column reserved for phase C (extension not required in MVP).
-
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- NOTE: gen_random_uuid() is built into Postgres 13+, so no extension is needed.
+-- (0001 checksum changed pre-production; no prod database exists yet.)
 
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

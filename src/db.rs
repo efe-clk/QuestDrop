@@ -72,7 +72,15 @@ async fn find_or_create_user(
     .bind(handle)
     .bind(email)
     .fetch_one(&mut **tx)
-    .await?;
+    .await
+    .map_err(|e| match &e {
+        // Two concurrent first-drops can both pass the SELECT checks above;
+        // the UNIQUE constraint arbitrates — report 409, not 503.
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
+            DbError::Conflict("handle or email is already taken".into())
+        }
+        _ => DbError::Db(e),
+    })?;
     Ok(id)
 }
 

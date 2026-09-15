@@ -5,7 +5,7 @@ COPY src ./src
 COPY templates ./templates
 COPY migrations ./migrations
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/* \
-  && cargo build --release
+  && cargo build --locked --release
 
 FROM debian:bookworm-slim
 WORKDIR /app

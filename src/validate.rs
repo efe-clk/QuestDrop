@@ -71,7 +71,9 @@ fn valid_voice(v: &str) -> bool {
     if !lower.ends_with(".mp3") {
         return false;
     }
-    if lower.starts_with("/voice/") && !lower.contains("..") {
+    // Exact prefix: ServeDir is case-sensitive on Linux, so /VOICE/x.mp3
+    // would validate but 404. Absolute URLs go through scheme checks.
+    if v.starts_with("/voice/") && !v.contains("..") {
         return true;
     }
     valid_http_url(v, 2048)
@@ -89,11 +91,11 @@ pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
         errs.push("email is invalid".into());
     }
     let title = r.title.trim().to_string();
-    if !(3..=80).contains(&title.len()) {
+    if !(3..=80).contains(&title.chars().count()) {
         errs.push("title must be 3-80 chars".into());
     }
     let one_liner = r.one_liner.trim().to_string();
-    if !(10..=200).contains(&one_liner.len()) {
+    if !(10..=200).contains(&one_liner.chars().count()) {
         errs.push("one_liner must be 10-200 chars".into());
     }
     let link_url = r.link_url.trim().to_string();
@@ -118,8 +120,10 @@ pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
+    skills.sort();
+    skills.dedup();
     skills.truncate(10);
-    if skills.iter().any(|s| s.len() > 32) {
+    if skills.iter().any(|s| s.chars().count() > 32) {
         errs.push("each skill must be 1-32 chars".into());
     }
 
@@ -188,5 +192,18 @@ mod tests {
         bad.link_url = "https://github.com/x/y".into();
         bad.voice_url = "/voice/../../etc/passwd.mp3".into();
         assert!(validate_drop(&bad).is_err());
+        bad.voice_url = "/VOICE/abc.mp3".into();
+        assert!(validate_drop(&bad).is_err(), "case-variant prefix 404s on Linux");
+    }
+
+    #[test]
+    fn counts_chars_not_bytes_and_dedupes_skills() {
+        let mut ok = good();
+        ok.title = "ç".repeat(80);
+        ok.skill_needed = vec!["Rust".into(), "rust".into(), " RUST ".into()];
+        let v = validate_drop(&ok).expect("80 chars must pass regardless of bytes");
+        assert_eq!(v.skill_needed, vec!["rust"]);
+        ok.title = "ç".repeat(81);
+        assert!(validate_drop(&ok).is_err(), "81 chars must fail");
     }
 }
