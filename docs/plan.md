@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Build Plan
 
-Status: Phase 0-4 done, round 11 (supply-chain verdict, EXPLAIN-verified indexes, 29 tests green).
+Status: Phase 0-4 done, round 12 (shaped 405, traversal-proofed, 30 tests green).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 

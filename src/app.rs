@@ -498,8 +498,18 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
                 .route_layer(middleware::from_fn_with_state(swap_limiter, posts_limit)),
         )
         .nest_service("/voice", ServeDir::new(&voice_dir))
-        .fallback(fallback_404);
+        .fallback(fallback_404)
+        .method_not_allowed_fallback(method_not_allowed);
     security_headers(router).with_state(state)
+}
+
+/// Wrong method on a known path: shaped 405 instead of Axum's empty default.
+async fn method_not_allowed() -> Response {
+    problem(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed for this path",
+    )
+    .into_response()
 }
 
 /// Unmatched paths: trim one trailing slash via 308 (idempotent, so no
