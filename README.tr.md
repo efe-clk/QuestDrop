@@ -58,6 +58,7 @@ Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
 | GET | `/voice/*` | local mp3 dosyaları |
 | POST | `/v1/auth/request` | magic-link e-postası (15dk token) |
 | POST | `/v1/auth/callback` | token → HttpOnly session cookie |
+| POST | `/v1/auth/logout` | session'ı yok et (idempotent) |
 | GET | `/v1/me` | session kimliği (cookiesiz 401) |
 | POST | `/v1/voice` | mp3 yükleme, 5MB cap (login) |
 

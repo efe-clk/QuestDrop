@@ -58,6 +58,7 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 | GET | `/voice/*` | local mp3 files |
 | POST | `/v1/auth/request` | magic-link email (15-min token) |
 | POST | `/v1/auth/callback` | redeem token → HttpOnly session cookie |
+| POST | `/v1/auth/logout` | destroy session (idempotent) |
 | GET | `/v1/me` | session identity (401 without cookie) |
 | POST | `/v1/voice` | mp3 upload, 5MB cap (login) |
 

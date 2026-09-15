@@ -238,6 +238,48 @@ pub async fn load_session_user(
     .await
 }
 
+/// Deletes a session by cookie value. Unknown/garbled cookies still
+/// return true (logout is idempotent — no oracle).
+pub async fn destroy_session(
+    pool: &PgPool,
+    secret: &[u8],
+    cookie: &str,
+) -> Result<(), sqlx::Error> {
+    let (id_str, sig) = match cookie.split_once('.') {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let sid: Uuid = match id_str.parse() {
+        Ok(u) => u,
+        Err(_) => return Ok(()),
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac key");
+    mac.update(id_str.as_bytes());
+    let Some(sig_bytes) = hex_decode(sig) else {
+        return Ok(());
+    };
+    if mac.verify_slice(&sig_bytes).is_err() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM sessions WHERE id = $1")
+        .bind(sid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set-Cookie value assembly in one place (callback + logout clearing).
+pub fn set_cookie_header(value: &str, clear: bool) -> String {
+    let secure = std::env::var("BASE_URL")
+        .map(|u| u.starts_with("https://"))
+        .unwrap_or(false);
+    format!(
+        "{COOKIE_NAME}={value}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{}",
+        if clear { 0 } else { 30 * 24 * 3600 },
+        if secure && !clear { "; Secure" } else { "" }
+    )
+}
+
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -351,5 +393,18 @@ mod tests {
         assert_eq!(derive_handle("Dev-X@x.com", None), "dev_x");
         assert_eq!(derive_handle("ab@x.com", None), "user_quest");
         assert_eq!(derive_handle("a@x.com", Some("my_handle")), "my_handle");
+    }
+
+    #[test]
+    fn cookie_flags_follow_base_url_scheme() {
+        std::env::set_var("BASE_URL", "https://questdrop.example");
+        let https = set_cookie_header("v", false);
+        assert!(https.contains("; Secure"), "https must set Secure");
+        std::env::set_var("BASE_URL", "http://localhost:3000");
+        let http = set_cookie_header("v", false);
+        assert!(!http.contains("Secure"), "plain http must not set Secure");
+        assert!(http.contains("HttpOnly") && http.contains("SameSite=Lax"));
+        let cleared = set_cookie_header("dead", true);
+        assert!(cleared.contains("Max-Age=0"));
     }
 }

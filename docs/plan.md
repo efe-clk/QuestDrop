@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Build Plan
 
-Status: ALL DONE — MVP + B + C + Auth + Upload + digest-pin (41 tests green, image proven).
+Status: ALL DONE + round 15 (logout, Secure cookies, webhook timeout, voice quota, bot shutdown — 45 tests green).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 

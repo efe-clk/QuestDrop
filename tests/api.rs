@@ -1390,6 +1390,121 @@ async fn voice_upload_rejects_oversize() {
 }
 
 #[tokio::test]
+async fn logout_kills_session() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "out@x.com", Some("logout_u")).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/logout")
+                .header("cookie", format!("qd_session={ck}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cleared = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cleared.contains("Max-Age=0"));
+
+    // Old cookie is dead, and logout is idempotent.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/me")
+                .header("cookie", format!("qd_session={ck}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/logout")
+                .header("cookie", "qd_session=garbage.nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn concurrent_callback_redeems_once() {
+    // 3 parallel redeems of one token: exactly one 200, rest 401.
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let raw = questdrop::auth::issue_magic_token(&pool, "race@x.com", Some("race_u"))
+        .await
+        .unwrap();
+
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let app = app.clone();
+        let raw = raw.clone();
+        tasks.push(tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/callback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"token":"{raw}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }));
+    }
+    let mut ok = 0;
+    let mut denied = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            StatusCode::OK => ok += 1,
+            StatusCode::UNAUTHORIZED => denied += 1,
+            s => panic!("unexpected callback race status: {s}"),
+        }
+    }
+    assert_eq!(ok, 1);
+    assert_eq!(denied, 2);
+}
+
+#[tokio::test]
+async fn voice_quota_blocks_when_full() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    // Quota is read per request: keep it set until the assertion runs.
+    // DB_LOCK serializes integration tests, so no other test observes it.
+    std::env::set_var("VOICE_QUOTA_MB", "0");
+    let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "q@x.com", Some("quota_u")).await;
+    let (ct, body) = multipart_file("file", "a.mp3", "audio/mpeg", b"ID3\x04\x00\x00ok");
+    let (s, j) = post_voice(&app, ct, body, Some(&ck)).await;
+    std::env::remove_var("VOICE_QUOTA_MB");
+    assert_eq!(s, StatusCode::INSUFFICIENT_STORAGE, "body: {j}");
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;

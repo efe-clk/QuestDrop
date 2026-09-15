@@ -44,11 +44,35 @@ async fn main() {
 
     tracing::info!("bot polling every {interval}s");
     loop {
+        tokio::select! {
+            _ = shutdown() => {
+                tracing::info!("bot shutting down");
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
+        }
         match publisher::run_once(&pool, &*sink).await {
             Ok(0) => {}
             Ok(n) => tracing::info!("delivered {n} events"),
             Err(e) => tracing::error!(error = %e, "publisher batch failed"),
         }
-        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
+}
+
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = term.recv() => {},
+                _ = tokio::signal::ctrl_c() => {},
+            },
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }

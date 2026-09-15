@@ -588,9 +588,29 @@ async fn auth_callback(State(s): State<AppState>, Json(raw): Json<AuthCallback>)
         Err(e) => return db_error(DbError::Db(e)),
     };
     let mut res = (StatusCode::OK, Json(serde_json::json!({ "user_id": user }))).into_response();
-    if let Ok(v) = HeaderValue::from_str(&format!(
-        "{COOKIE_NAME}={value}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"
-    )) {
+    if let Ok(v) = HeaderValue::from_str(&auth::set_cookie_header(&value, false)) {
+        res.headers_mut().append(header::SET_COOKIE, v);
+    }
+    res
+}
+
+async fn auth_logout(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if let Some(pool) = &s.pool {
+        if let Some(cookie) = headers
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|c| {
+                c.split(';').find_map(|p| {
+                    let (k, v) = p.split_once('=')?;
+                    (k.trim() == COOKIE_NAME).then(|| v.trim().to_string())
+                })
+            })
+        {
+            let _ = auth::destroy_session(pool, &s.session_secret, &cookie).await;
+        }
+    }
+    let mut res = Json(serde_json::json!({ "logged_out": true })).into_response();
+    if let Ok(v) = HeaderValue::from_str(&auth::set_cookie_header("dead", true)) {
         res.headers_mut().append(header::SET_COOKIE, v);
     }
     res
@@ -646,6 +666,14 @@ async fn upload_voice(
     let _actor = match session_user(&s, &headers).await {
         Ok(u) => u,
         Err(r) => return *r,
+    };
+    // Disk-exhaustion guard: refuse new uploads past the quota (default 500MB).
+    let quota: u64 = std::env::var("VOICE_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    if voice_dir_usage(&s.voice_dir) >= quota.saturating_mul(1024 * 1024) {
+        return problem(StatusCode::INSUFFICIENT_STORAGE, "voice storage full").into_response();
     };
     let mut mp = match mp {
         Ok(m) => m,
@@ -767,6 +795,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
                 .route_layer(middleware::from_fn_with_state(auth_limiter, posts_limit)),
         )
         .route("/v1/auth/callback", post(auth_callback))
+        .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/me", get(me))
         .route("/v1/projects", get(list_projects))
         .route(
@@ -826,6 +855,18 @@ async fn fallback_404(uri: axum::http::Uri) -> Response {
         }
     }
     problem(StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+/// Flat-dir disk usage in bytes (voice files live directly in VOICE_DIR).
+fn voice_dir_usage(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 /// Defense in depth next to validation: refuse /voice/ URLs whose file is

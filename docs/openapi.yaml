@@ -51,6 +51,12 @@ paths:
           description: user_id, handle, email
         '401':
           $ref: '#/components/responses/Problem'
+  /v1/auth/logout:
+    post:
+      summary: Destroy the session (idempotent, clears the cookie)
+      responses:
+        '200':
+          description: logged_out flag
   /:
     get:
       summary: Home page (Askama HTML with pool count)

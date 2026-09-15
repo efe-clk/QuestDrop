@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum: HEPSİ BİTTİ — MVP + B + C + Auth + Upload + digest-pin (41 test yeşil, imaj kanıtlı).
+Durum: HEPSİ BİTTİ + 15. tur (logout, Secure cookie, webhook timeout, voice quota, bot shutdown — 45 test yeşil).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 

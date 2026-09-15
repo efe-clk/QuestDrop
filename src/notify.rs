@@ -43,10 +43,12 @@ pub struct WebhookSink {
 
 impl WebhookSink {
     pub fn new(url: String) -> Self {
-        Self {
-            url,
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            // No timeout = one hung webhook stalls the batch forever.
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { url, client }
     }
 
     fn discord_body(event: &OutboxEvent) -> serde_json::Value {
