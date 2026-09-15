@@ -908,6 +908,47 @@ async fn method_not_allowed_is_shaped_405() {
 }
 
 #[tokio::test]
+async fn same_key_race_executes_once() {
+    // 5 parallel identical keyed swaps: exactly one 201, four 200 replays,
+    // a single match row. The PK gate serializes the race.
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s8").await;
+    let body = swap_json(&uid_b, &offer_b, &offer_a);
+
+    let mut tasks = Vec::new();
+    for _ in 0..5 {
+        let app = app.clone();
+        let body = body.clone();
+        tasks.push(tokio::spawn(async move {
+            post_swap(&app, body, Some("key-s8-race")).await
+        }));
+    }
+    let mut fresh = 0;
+    let mut replayed = 0;
+    let mut ids = std::collections::HashSet::new();
+    for t in tasks {
+        let (s, j, r) = t.await.unwrap();
+        ids.insert(j["match_id"].clone());
+        match (s, r) {
+            (StatusCode::CREATED, false) => fresh += 1,
+            (StatusCode::OK, true) => replayed += 1,
+            (s, r) => panic!("unexpected race outcome: {s} replayed={r}"),
+        }
+    }
+    assert_eq!(fresh, 1);
+    assert_eq!(replayed, 4);
+    assert_eq!(ids.len(), 1, "all responses carry the same match");
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM matches")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;
