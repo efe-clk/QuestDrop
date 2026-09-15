@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Build Plan
 
-Status: ALL DONE + round 15 (logout, Secure cookies, webhook timeout, voice quota, bot shutdown — 45 tests green).
+Status: LOOP CLOSED — 16 audit rounds + 3 verification scans, 45 tests green.
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 

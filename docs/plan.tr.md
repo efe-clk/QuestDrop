@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum: HEPSİ BİTTİ + 15. tur (logout, Secure cookie, webhook timeout, voice quota, bot shutdown — 45 test yeşil).
+Durum: DÖNGÜ KAPANDI — 16 denetim turu + 3 doğrulama, 45 test yeşil.
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
