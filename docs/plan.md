@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Build Plan
 
-Status: B + C + Auth done, upload next (39 tests green).
+Status: B + C + Auth + Upload done, digest-pin + final verify left (41 tests green).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 

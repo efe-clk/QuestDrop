@@ -1297,6 +1297,98 @@ async fn auth_request_callback_me_loop() {
     assert_eq!(cb(raw2).await.status(), StatusCode::UNAUTHORIZED);
 }
 
+fn multipart_file(field: &str, filename: &str, ctype: &str, data: &[u8]) -> (String, Vec<u8>) {
+    let bound = "testboundary123";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{bound}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {ctype}\r\n\r\n").as_bytes());
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{bound}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={bound}"), body)
+}
+
+async fn post_voice(
+    app: &axum::Router,
+    content_type: String,
+    body: Vec<u8>,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/v1/voice")
+        .header("content-type", content_type);
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("qd_session={c}"));
+    }
+    let res = app
+        .clone()
+        .oneshot(b.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = to_bytes(res.into_body(), 8 * 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    (status, json)
+}
+
+#[tokio::test]
+async fn voice_upload_roundtrip() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "vu@x.com", Some("voice_u")).await;
+    // Fake but well-formed ID3 header.
+    let mut mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+    mp3.extend_from_slice(&[0u8; 256]);
+    let (ct, body) = multipart_file("file", "note.mp3", "audio/mpeg", &mp3);
+    let (s, j) = post_voice(&app, ct, body, Some(&ck)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let url = j["voice_url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/voice/") && url.ends_with(".mp3"));
+
+    // Served back with mp3 content type.
+    let res = app
+        .clone()
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .contains("mpeg"));
+
+    // Wrong magic -> 400; no session -> 401; wrong field -> 400.
+    let (ct, body) = multipart_file("file", "note.mp3", "audio/mpeg", b"not audio at all....");
+    let (s, _) = post_voice(&app, ct, body, Some(&ck)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (ct, body) = multipart_file("file", "note.mp3", "audio/mpeg", &mp3);
+    let (s, _) = post_voice(&app, ct, body, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (ct, body) = multipart_file("other", "note.mp3", "audio/mpeg", &mp3);
+    let (s, _) = post_voice(&app, ct, body, Some(&ck)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn voice_upload_rejects_oversize() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "big@x.com", Some("big_u")).await;
+    let mut big = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+    big.extend(std::iter::repeat_n(0u8, 6 * 1024 * 1024));
+    let (ct, body) = multipart_file("file", "big.mp3", "audio/mpeg", &big);
+    let (s, _) = post_voice(&app, ct, body, Some(&ck)).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 #[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);

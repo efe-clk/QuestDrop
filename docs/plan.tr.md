@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum: B + C + Auth bitti, upload sırada (39 test yeşil).
+Durum: B + C + Auth + Upload bitti, digest-pin + final doğrulama kaldı (41 test yeşil).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 

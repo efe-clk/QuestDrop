@@ -59,6 +59,7 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 | POST | `/v1/auth/request` | magic-link email (15-min token) |
 | POST | `/v1/auth/callback` | redeem token → HttpOnly session cookie |
 | GET | `/v1/me` | session identity (401 without cookie) |
+| POST | `/v1/voice` | mp3 upload, 5MB cap (login) |
 
 ## Quickstart (5 min)
 

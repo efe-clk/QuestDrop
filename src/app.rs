@@ -622,6 +622,87 @@ async fn me(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Respon
         Err(e) => db_error(DbError::Db(e)),
     }
 }
+/// MP3 upload (session required): streams the "file" field, enforces a 5MB
+/// cap while reading (the global 2MB default is disabled for this route),
+/// checks magic bytes (ID3 or frame sync), stores under a random name so
+/// client filenames can never traverse. Duration check stays pending.
+const VOICE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+fn looks_like_mp3(head: &[u8]) -> bool {
+    if head.len() < 4 {
+        return false;
+    }
+    if &head[0..3] == b"ID3" {
+        return true;
+    }
+    head[0] == 0xFF && head[1] & 0xE0 == 0xE0
+}
+
+async fn upload_voice(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    mp: Result<axum::extract::Multipart, axum::extract::multipart::MultipartRejection>,
+) -> Response {
+    let _actor = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let mut mp = match mp {
+        Ok(m) => m,
+        Err(e) => {
+            return problem_errors(e.status(), "invalid multipart", vec![e.body_text()])
+                .into_response();
+        }
+    };
+    while let Some(field) = mp.next_field().await.unwrap_or(None) {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut field = field;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    bytes.extend_from_slice(&chunk);
+                    if bytes.len() > VOICE_MAX_BYTES {
+                        return problem(StatusCode::PAYLOAD_TOO_LARGE, "voice max 5MB")
+                            .into_response();
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    return problem(StatusCode::BAD_REQUEST, "unreadable upload").into_response();
+                }
+            }
+        }
+        if !looks_like_mp3(&bytes) {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "not an mp3 (ID3 or frame sync required)",
+            )
+            .into_response();
+        }
+        let name = format!("{}.mp3", uuid::Uuid::new_v4());
+        if tokio::fs::write(s.voice_dir.join(&name), &bytes)
+            .await
+            .is_err()
+        {
+            return problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed")
+                .into_response();
+        }
+        return (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "voice_url": format!("/voice/{name}") })),
+        )
+            .into_response();
+    }
+    problem(
+        StatusCode::BAD_REQUEST,
+        "multipart field 'file' is required",
+    )
+    .into_response()
+}
+
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
     conn: Option<ConnectInfo<SocketAddr>>,
@@ -666,6 +747,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     let swap_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let report_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let auth_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let voice_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let voice_dir = std::path::PathBuf::from(
         std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
     );
@@ -708,6 +790,12 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
             "/v1/swaps",
             post(create_swap)
                 .route_layer(middleware::from_fn_with_state(swap_limiter, posts_limit)),
+        )
+        .route(
+            "/v1/voice",
+            post(upload_voice)
+                .route_layer(middleware::from_fn_with_state(voice_limiter, posts_limit))
+                .route_layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .nest_service("/voice", ServeDir::new(&voice_dir))
         .fallback(fallback_404)

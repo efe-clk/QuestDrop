@@ -57,6 +57,28 @@ paths:
       responses:
         '200':
           description: html
+  /v1/voice:
+    post:
+      summary: Upload an mp3 (LOGIN REQUIRED, 5MB cap, magic bytes checked, random filename)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: voice_url
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
   /voice/{file}:
     get:
       summary: Local static mp3 files
