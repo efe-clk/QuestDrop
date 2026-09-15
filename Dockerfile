@@ -9,10 +9,12 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 
 FROM debian:bookworm-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
+  && useradd -r -u 10001 appuser
 COPY --from=build /app/target/release/questdrop ./questdrop
 COPY templates ./templates
-RUN mkdir -p ./data/voice
+RUN mkdir -p ./data/voice && chown -R appuser:appuser /app
+USER appuser
 ENV PORT=3000 VOICE_DIR=./data/voice
 EXPOSE 3000
 CMD ["./questdrop"]

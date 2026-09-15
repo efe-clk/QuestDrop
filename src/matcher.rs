@@ -60,7 +60,7 @@ impl Matcher for RuleMatcher {
                 let fit =
                     (overlap(&user.can_do, &p.skill_needed) + overlap(&user.looking_for, &p.skill_needed)) / 2.0;
                 let rand_v: f64 = rng.gen();
-                let score = (fit * 0.8 + rand_v * 0.2 * 100.0).round() / 100.0;
+                let score = ((fit * 0.8 + rand_v * 0.2) * 100.0).round() / 100.0;
                 RankedItem {
                     id: p.id.clone(),
                     skill_needed: p.skill_needed.clone(),
@@ -115,11 +115,27 @@ mod tests {
         let out = m.match_items(&user, &pool);
         assert!(out.iter().all(|r| r.id != "u1"));
         assert!(out.len() <= 4);
-        let mut sorted = out.clone();
-        sorted.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
         // top-3 ordered, surprise last — scores of first three non-increasing
         if out.len() >= 3 {
             assert!(out[0].score >= out[1].score && out[1].score >= out[2].score);
+        }
+    }
+
+    #[test]
+    fn scores_stay_in_range() {
+        // Regression test: operator-precedence bug once pushed scores above 1.0
+        // because the random term was scaled by 100 before rounding.
+        let m = RuleMatcher;
+        let user = QuestUser {
+            id: "u1".into(),
+            can_do: vec!["rust".into()],
+            looking_for: vec!["go".into()],
+        };
+        let pool = vec![item("p1", &["rust"]), item("p2", &["go"])];
+        for _ in 0..200 {
+            for r in m.match_items(&user, &pool) {
+                assert!((0.0..=1.0).contains(&r.score), "score out of range: {}", r.score);
+            }
         }
     }
 }

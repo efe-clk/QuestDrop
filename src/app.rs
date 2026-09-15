@@ -1,0 +1,284 @@
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+
+use askama::Template;
+use axum::{
+    Json, Router,
+    extract::{ConnectInfo, Query, State},
+    http::{HeaderValue, Request, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
+use sqlx::postgres::PgPoolOptions;
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
+use tracing::warn;
+
+use crate::{
+    db::{self, DbError},
+    ratelimit::RateLimiter,
+    validate::{RawDrop, validate_drop},
+};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: Option<sqlx::PgPool>,
+    pub limiter: Arc<RateLimiter>,
+}
+
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate {
+    pool_count: i64,
+}
+
+#[derive(Serialize)]
+struct Health {
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct Problem {
+    #[serde(rename = "type")]
+    type_: &'static str,
+    title: &'static str,
+    status: u16,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<Vec<String>>,
+}
+
+pub fn problem(status: StatusCode, detail: impl Into<String>) -> (StatusCode, Json<Problem>) {
+    (
+        status,
+        Json(Problem {
+            type_: "about:blank",
+            title: status.canonical_reason().unwrap_or("Error"),
+            status: status.as_u16(),
+            detail: detail.into(),
+            errors: None,
+        }),
+    )
+}
+
+fn problem_errors(
+    status: StatusCode,
+    detail: impl Into<String>,
+    errors: Vec<String>,
+) -> (StatusCode, Json<Problem>) {
+    (
+        status,
+        Json(Problem {
+            type_: "about:blank",
+            title: status.canonical_reason().unwrap_or("Error"),
+            status: status.as_u16(),
+            detail: detail.into(),
+            errors: Some(errors),
+        }),
+    )
+}
+
+fn db_error(e: DbError) -> Response {
+    match e {
+        DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
+        DbError::DailyCap => problem(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("max {} drops per day", db::MAX_DROPS_PER_DAY),
+        )
+        .into_response(),
+        DbError::Db(inner) => {
+            // Never leak driver internals to clients; full error goes to logs.
+            tracing::error!(error = %inner, "database failure");
+            problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response()
+        }
+    }
+}
+
+async fn index(State(s): State<AppState>) -> Response {
+    let count = match &s.pool {
+        Some(p) => db::count_open(p).await.unwrap_or(0),
+        None => 0,
+    };
+    match (IndexTemplate { pool_count: count }).render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "template render failed");
+            problem(StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
+        }
+    }
+}
+
+async fn health() -> impl IntoResponse {
+    Json(Health { status: "ok" })
+}
+
+#[derive(Deserialize)]
+struct PoolQuery {
+    cursor: Option<uuid::Uuid>,
+    limit: Option<i64>,
+}
+
+async fn list_projects(State(s): State<AppState>, Query(q): Query<PoolQuery>) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let limit = q.limit.unwrap_or(20).clamp(1, 50);
+    match db::list_pool(pool, q.cursor, limit).await {
+        Ok((items, next_cursor)) => Json(serde_json::json!({
+            "pool": items,
+            "next_cursor": next_cursor,
+        }))
+        .into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MatchQuery {
+    user_id: Option<String>,
+}
+
+async fn match_pool(Query(_q): Query<MatchQuery>) -> Response {
+    // Phase 2 wires RuleMatcher to the real pool. Contract already fixed.
+    Json(serde_json::json!({ "matches": [] })).into_response()
+}
+
+async fn create_project(State(s): State<AppState>, Json(raw): Json<RawDrop>) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let valid = match validate_drop(&raw) {
+        Ok(v) => v,
+        Err(errs) => {
+            return problem_errors(StatusCode::BAD_REQUEST, "invalid drop", errs).into_response();
+        }
+    };
+    match db::create_drop(pool, &valid).await {
+        Ok((project_id, offer_id)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "project_id": project_id, "offer_id": offer_id })),
+        )
+            .into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
+/// 10 drops/min per IP on the write endpoint (spam-flood guard until auth).
+async fn posts_limit(
+    State(lim): State<Arc<RateLimiter>>,
+    conn: Option<ConnectInfo<SocketAddr>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let ip = conn
+        .map(|c| c.0.ip())
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+    if let Some(retry) = lim.check(ip) {
+        let (status, body) = problem(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limit: 10 drops/min per IP",
+        );
+        let mut res = (status, body).into_response();
+        res.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from(retry),
+        );
+        return res;
+    }
+    next.run(req).await
+}
+
+fn security_headers(router: Router<AppState>) -> Router<AppState> {
+    router
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ))
+}
+
+pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
+    let limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let state = AppState {
+        pool,
+        limiter: limiter.clone(),
+    };
+    let router = Router::new()
+        .route("/", get(index))
+        .route("/health", get(health))
+        .route("/v1/projects", get(list_projects))
+        .route(
+            "/v1/projects",
+            post(create_project).route_layer(middleware::from_fn_with_state(
+                limiter,
+                posts_limit,
+            )),
+        )
+        .route("/v1/match", get(match_pool))
+        .nest_service(
+            "/voice",
+            ServeDir::new(
+                std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
+            ),
+        );
+    security_headers(router).with_state(state)
+}
+
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    dotenvy::dotenv().ok();
+
+    let pool = match std::env::var("DATABASE_URL") {
+        Ok(url) => match PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&url)
+            .await
+        {
+            Ok(p) => {
+                sqlx::migrate!("./migrations").run(&p).await?;
+                Some(p)
+            }
+            Err(e) => {
+                warn!("DB unreachable, running without pool: {e}");
+                None
+            }
+        },
+        Err(_) => {
+            warn!("DATABASE_URL unset, running without pool");
+            None
+        }
+    };
+
+    let voice_dir = std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into());
+    std::fs::create_dir_all(&voice_dir)?;
+
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("bind {addr}: {e} (is another server on this port?)"))?;
+    tracing::info!("listening on {addr}");
+    axum::serve(
+        listener,
+        build_app(pool).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}

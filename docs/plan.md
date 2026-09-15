@@ -2,6 +2,8 @@
 
 # QuestDrop — Rust Build Plan
 
+Status: Phase 0 done, Phase 1 done (2026-09-15, 12 tests green + live E2E).
+
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 
 ## Phase 0 — Scaffold (4h)

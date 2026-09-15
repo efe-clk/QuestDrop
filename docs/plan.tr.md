@@ -2,6 +2,8 @@
 
 # QuestDrop — Rust Yapım Planı
 
+Durum: Faz 0 bitti, Faz 1 bitti (2026-09-15, 12 test yeşil + canlı E2E).
+
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
 ## Faz 0 — İskelet (4 saat)
