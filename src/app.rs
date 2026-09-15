@@ -18,7 +18,7 @@ use crate::{
     db::{self, DbError},
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
-    validate::{validate_drop, validate_profile, RawDrop, RawProfile},
+    validate::{validate_drop, validate_profile, validate_report, RawDrop, RawProfile, RawReport},
 };
 
 #[derive(Clone)]
@@ -362,6 +362,63 @@ async fn create_swap(
     }
 }
 
+#[derive(Deserialize)]
+struct ReviveQuery {
+    user_id: Option<uuid::Uuid>,
+}
+
+async fn revive(
+    State(s): State<AppState>,
+    q: Result<Query<ReviveQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
+        }
+    };
+    let Some(uid) = q.user_id else {
+        return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
+    };
+    match db::latest_revive(pool, uid).await {
+        Ok(Some(pkg)) => Json(pkg).into_response(),
+        Ok(None) => problem(StatusCode::NOT_FOUND, "no completed swaps yet").into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
+async fn create_report(
+    State(s): State<AppState>,
+    raw: Result<Json<RawReport>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let raw = match raw {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
+        }
+    };
+    let valid = match validate_report(&raw) {
+        Ok(v) => v,
+        Err(errs) => {
+            return problem_errors(StatusCode::BAD_REQUEST, "invalid report", errs).into_response();
+        }
+    };
+    match db::create_report(pool, valid.reporter_id, valid.project_id, &valid.reason).await {
+        Ok((report_id, hidden)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "report_id": report_id, "hidden": hidden })),
+        )
+            .into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
 /// 10 writes/min per IP on the write endpoints (spam-flood guard until auth).
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
@@ -401,10 +458,11 @@ fn security_headers(router: Router<AppState>) -> Router<AppState> {
 }
 
 pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
-    // Separate budgets: spamming profiles must not eat the drop quota.
+    // Separate budgets: spamming one endpoint must not eat the others' quota.
     let drop_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let profile_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let swap_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let report_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let voice_dir = std::path::PathBuf::from(
         std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
     );
@@ -429,6 +487,12 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
                 .route_layer(middleware::from_fn_with_state(profile_limiter, posts_limit)),
         )
         .route("/v1/match", get(match_pool))
+        .route("/v1/revive", get(revive))
+        .route(
+            "/v1/reports",
+            post(create_report)
+                .route_layer(middleware::from_fn_with_state(report_limiter, posts_limit)),
+        )
         .route(
             "/v1/swaps",
             post(create_swap)

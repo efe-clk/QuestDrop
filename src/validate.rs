@@ -180,6 +180,51 @@ fn clean_skills(raw: &[String], errs: &mut Vec<String>) -> Vec<String> {
     out
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct RawReport {
+    pub reporter_id: Option<uuid::Uuid>,
+    pub project_id: Option<uuid::Uuid>,
+    pub reason: String,
+}
+
+#[derive(Debug)]
+pub struct ValidatedReport {
+    pub reporter_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
+    pub reason: String,
+}
+
+pub fn validate_report(r: &RawReport) -> Result<ValidatedReport, Vec<String>> {
+    let mut errs: Vec<String> = Vec::new();
+    let reporter_id = match r.reporter_id {
+        Some(id) => id,
+        None => {
+            errs.push("reporter_id is required".into());
+            uuid::Uuid::nil()
+        }
+    };
+    let project_id = match r.project_id {
+        Some(id) => id,
+        None => {
+            errs.push("project_id is required".into());
+            uuid::Uuid::nil()
+        }
+    };
+    let reason = r.reason.trim().to_string();
+    if !(10..=300).contains(&reason.chars().count()) {
+        errs.push("reason must be 10-300 chars".into());
+    }
+    if errs.is_empty() {
+        Ok(ValidatedReport {
+            reporter_id,
+            project_id,
+            reason,
+        })
+    } else {
+        Err(errs)
+    }
+}
 /// Skill profile for matching. Without this every user has empty skills and
 /// the matcher degrades to pure random — this endpoint keeps fit meaningful.
 pub fn validate_profile(r: &RawProfile) -> Result<ValidatedProfile, Vec<String>> {

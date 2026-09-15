@@ -651,6 +651,176 @@ async fn swap_race_single_winner() {
     assert_eq!(lost, 4);
 }
 
+async fn post_report(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/reports")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    (status, json)
+}
+
+async fn upsert(app: &axum::Router, handle: &str, email: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/upsert")
+                .header("content-type", "application/json")
+                .body(
+                    Body::from(
+                        serde_json::json!({"handle": handle, "email": email, "can_do": [], "looking_for": []})
+                            .to_string(),
+                    ),
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), 65536).await.unwrap();
+    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["user_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn third_report_hides_project() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    let (s, _) = post_drop(&app, drop_json("rep_a", "repa@x.com", "Flagged quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let project: String = sqlx::query_scalar(
+        "SELECT p.id::text FROM projects p JOIN users u ON u.id=p.giver_id WHERE u.handle='rep_a'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mk = |uid: &str| serde_json::json!({"reporter_id": uid, "project_id": project, "reason": "This looks like spam content here"});
+
+    let uid_b = upsert(&app, "rep_b", "repb@x.com").await;
+    let (s, j) = post_report(&app, mk(&uid_b)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(j["hidden"], false);
+    // Duplicate + own-report + unknown ids + short reason.
+    let (s, _) = post_report(&app, mk(&uid_b)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let uid_a: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='rep_a'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (s, _) = post_report(&app, mk(&uid_a)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = post_report(
+        &app,
+        serde_json::json!({"reporter_id": "00000000-0000-0000-0000-000000000000", "project_id": project, "reason": "This looks like spam content here"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, j) = post_report(
+        &app,
+        serde_json::json!({"reporter_id": uid_b, "project_id": project, "reason": "short"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(j["errors"].is_array());
+
+    let uid_c = upsert(&app, "rep_c", "repc@x.com").await;
+    let uid_d = upsert(&app, "rep_d", "repd@x.com").await;
+    let (s, _) = post_report(&app, mk(&uid_c)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, j) = post_report(&app, mk(&uid_d)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(j["hidden"], true);
+
+    // Hidden from pool and unswappable.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let pool_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(pool_json["pool"].as_array().unwrap().len(), 0);
+    let offer: String = sqlx::query_scalar(
+        "SELECT o.id::text FROM swap_offers o JOIN projects p ON p.id=o.project_id JOIN users u ON u.id=p.giver_id WHERE u.handle='rep_a'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, _, _) = post_swap(&app, swap_json(&uid_c, &offer, &offer), None).await;
+    assert_ne!(s, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn revive_returns_package_and_task() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "rv").await;
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/revive?user_id={uid_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["project"]["title"], "A quest");
+    assert_eq!(json["first_task"]["minutes"], 2);
+    assert_eq!(json["first_task"]["steps"].as_array().unwrap().len(), 4);
+
+    // Giver with no takes + unknown user -> 404.
+    let uid_a: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='sw_a_rv'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for uri in [
+        format!("/v1/revive?user_id={uid_a}"),
+        "/v1/revive?user_id=00000000-0000-0000-0000-000000000000".to_string(),
+        "/v1/revive".to_string(),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error(), "{uri}");
+    }
+}
+
 #[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);

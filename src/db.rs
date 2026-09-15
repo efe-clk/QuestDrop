@@ -463,3 +463,151 @@ pub async fn create_swap(
     tx.commit().await?;
     Ok((201, body))
 }
+
+/// Reports a project. Third distinct report auto-hides it (spec §6):
+/// project + its open offers go OPEN -> CLOSED in the same transaction.
+/// Returns (report_id, hidden_now).
+pub async fn create_report(
+    pool: &PgPool,
+    reporter: Uuid,
+    project: Uuid,
+    reason: &str,
+) -> Result<(Uuid, bool), DbError> {
+    let mut tx = pool.begin().await?;
+    if sqlx::query("SELECT 1 FROM users WHERE id = $1")
+        .bind(reporter)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        tx.rollback().await?;
+        return Err(DbError::NotFound("unknown reporter".into()));
+    }
+    let giver: Option<Uuid> = sqlx::query_scalar("SELECT giver_id FROM projects WHERE id = $1")
+        .bind(project)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(giver) = giver else {
+        tx.rollback().await?;
+        return Err(DbError::NotFound("unknown project".into()));
+    };
+    if giver == reporter {
+        tx.rollback().await?;
+        return Err(DbError::Conflict("cannot report your own project".into()));
+    }
+    let report_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO reports (project_id, reporter_id, reason) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(project)
+    .bind(reporter)
+    .bind(reason)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
+            DbError::Conflict("already reported".into())
+        }
+        _ => DbError::Db(e),
+    })?;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reports WHERE project_id = $1")
+        .bind(project)
+        .fetch_one(&mut *tx)
+        .await?;
+    let mut hidden = false;
+    if n >= 3 {
+        let closed: u64 = sqlx::query(
+            "UPDATE projects SET status = 'CLOSED' WHERE id = $1 AND status = 'OPEN'::project_status",
+        )
+        .bind(project)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if closed > 0 {
+            sqlx::query(
+                "UPDATE swap_offers SET status = 'CLOSED' WHERE project_id = $1 AND status = 'OPEN'::offer_status",
+            )
+            .bind(project)
+            .execute(&mut *tx)
+            .await?;
+            hidden = true;
+        }
+    }
+    tx.commit().await?;
+    Ok((report_id, hidden))
+}
+
+#[derive(Debug, Serialize)]
+pub struct FirstTask {
+    pub title: String,
+    pub minutes: u8,
+    pub steps: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Revive {
+    pub match_id: Uuid,
+    pub matched_at: DateTime<Utc>,
+    pub project: PoolRow,
+    pub first_task: FirstTask,
+}
+
+/// First 2-minute task for a revived quest: open, listen, smallest step.
+pub fn first_task_for(project: &PoolRow) -> FirstTask {
+    let hands_on = project
+        .skill_needed
+        .first()
+        .map(|s| format!("Reproduce the smallest '{s}' piece locally"))
+        .unwrap_or_else(|| "Reproduce the smallest piece locally".into());
+    FirstTask {
+        title: format!("First 2 minutes with '{}'", project.title),
+        minutes: 2,
+        steps: vec![
+            "Open the project link and skim for 30 seconds".into(),
+            "Listen to the voice note end to end".into(),
+            hands_on,
+            "Write down the single next step".into(),
+        ],
+    }
+}
+
+/// Latest completed swap for a taker + its freeze package + first task.
+pub async fn latest_revive(pool: &PgPool, taker: Uuid) -> Result<Option<Revive>, DbError> {
+    let row = sqlx::query(
+        "SELECT m.id AS match_id, m.created_at AS matched_at,
+                p.id, p.title, p.one_liner, p.link_url, p.voice_url, p.skill_needed,
+                p.time_bucket::text AS time_bucket, p.energy::text AS energy,
+                u.handle AS giver_handle, p.created_at
+         FROM matches m
+         JOIN projects p ON p.id = m.taken_id
+         JOIN users u ON u.id = p.giver_id
+         WHERE m.taker_id = $1
+         ORDER BY m.created_at DESC, m.id DESC LIMIT 1",
+    )
+    .bind(taker)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match row {
+        Some(r) => {
+            let project = PoolRow {
+                id: r.try_get("id")?,
+                title: r.try_get("title")?,
+                one_liner: r.try_get("one_liner")?,
+                link_url: r.try_get("link_url")?,
+                voice_url: r.try_get("voice_url")?,
+                skill_needed: r.try_get("skill_needed")?,
+                time_bucket: r.try_get("time_bucket")?,
+                energy: r.try_get("energy")?,
+                giver_handle: r.try_get("giver_handle")?,
+                created_at: r.try_get("created_at")?,
+            };
+            let task = first_task_for(&project);
+            Some(Revive {
+                match_id: r.try_get("match_id")?,
+                matched_at: r.try_get("matched_at")?,
+                project,
+                first_task: task,
+            })
+        }
+        None => None,
+    })
+}
