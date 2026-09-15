@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum: Faz 0-4 bitti, 12. tur (şekilli 405, traversal korumalı, 30 test yeşil).
+Durum: Faz 0-4 bitti, 13. tur (idempotency yarış-güvenli, 31 test yeşil).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
