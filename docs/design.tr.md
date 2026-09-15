@@ -1,9 +1,9 @@
 > 🇬🇧 Click for English: [design.md](./design.md)
 
-# QuestDrop — Tasarım Dokümanı
+# QuestDrop — Tasarım Dokümanı (Rust)
 
 Tarih: 2026-09-15
-Durum: Taslak, onay bekliyor
+Durum: Taslak, Rust stack kilitli
 
 ## 1. Amaç
 
@@ -27,8 +27,8 @@ Tek repo, API-first modüler monolit. Mikroservis yok.
 ```
 
 - Core dış dünyayı bilmez. Web de bot da aynı REST'i kullanır.
-- Eşleşme tek interface: `Matcher.match(user, pool) -> ranked_list`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` aynı interface ile takılır.
-- Event: `swap.created` için basit DB outbox tablosu. Bot bildirimi ve AI yeniden-sıralama bunu dinler.
+- Eşleşme tek trait: `trait Matcher { fn match(user, pool) -> ranked_list }`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` impl.
+- Event: `swap.created` için basit DB outbox tablosu (sqlx, poll eden publisher). Bot bildirimi ve AI yeniden-sıralama bunu dinler.
 - Auth: magic link. Dosya: link (S3 yok). Ses: 30sn mp3.
 
 ## 4. Bileşenler + Veri Modeli

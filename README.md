@@ -1,6 +1,6 @@
 > 🇹🇷 Türkçe için tıklayın: [README.tr.md](./README.tr.md)
 
-# QuestDrop
+# QuestDrop (Rust)
 
 Turn abandoned side-projects into tradeable quests. Tired of it? Drop it. Pick up someone else's half-finished quest and keep going with fresh novelty dopamine.
 
@@ -14,38 +14,39 @@ Success criterion: strangers trading in the open pool.
 
 ## Architecture
 
-Single repo, API-first modular monolith. No microservices.
+Single repo, API-first modular monolith in Rust. No microservices.
 
 ```text
-[Web UI] -> [API Core] -> [DB]
-[Bot]   -> [API Core] (later, same API)
+[Web UI - Askama+HTMX] -> [API Core - Axum] -> [Postgres+sqlx]
+[Bot] -----------------> [API Core - Axum] (later, same API)
 ```
 
-- Core knows nothing about the outside world. Web and bot use the same REST API.
-- Matching is one interface: `Matcher.match(user, pool) -> ranked_list`. Rule-based now, `EmbeddingMatcher` plugs into the same interface later.
+- Core knows nothing about the outside world. Web and bot use the same REST API (`/v1/`).
+- Matching is one trait: `trait Matcher { fn match(...) -> ranked_list }`. Rule-based now, `EmbeddingMatcher` impl later.
 - Event: simple DB outbox table for `swap.created`. Bot notifications and AI re-ranking listen to it.
-- Auth: magic link. Files: link only (no S3). Voice: 30s mp3.
+- Auth: email magic link. Files: link only (no S3). Voice: 30s mp3 in `./data/voice`.
 
-## Stack (locked)
+## Stack (locked - Rust)
 
-- Web + API: Next.js App Router (TypeScript), REST
-- DB: Postgres (Neon) + Prisma, pgvector column ready (NULL for now)
-- Auth: Auth.js email magic link
-- Voice storage: Vercel Blob
-- Deploy: Vercel + Neon
+- Web + API: Axum + Askama + HTMX, single binary
+- DB: Postgres + sqlx, pgvector reserved
+- Auth: magic link (lettre) + cookie session
+- Voice: local static files
+- Deploy: Docker + Fly.io
 
 Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 
 ## Docs
 
 - Design (EN): [docs/design.md](./docs/design.md)
+- Plan (EN): [docs/plan.md](./docs/plan.md)
 - Tasarım (TR): [docs/design.tr.md](./docs/design.tr.md)
+- Plan (TR): [docs/plan.tr.md](./docs/plan.tr.md)
 
 ## Quickstart
 
 ```bash
-npm install
-npm run dev
+cargo run
 ```
 
-> Scaffold landing in next commit. See design doc for flow.
+> Scaffold landing in next commit. See plan for phases.

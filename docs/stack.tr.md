@@ -1,22 +1,23 @@
 > 🇬🇧 Click for English: [stack.md](./stack.md)
 
-# Altyapı — Kilitli
+# Altyapı — Kilitli (Rust)
 
 Tarih: 2026-09-15
 
 ## Karar
 
-- Web + API: Next.js App Router (TypeScript), REST route handler. Tek repo, tek deploy. Bot sonradan aynı endpointleri kullanır.
-- DB: Postgres (Neon) + Prisma. Row-lock takas transaction + outbox tablosu kolay. `embedding` kolonu pgvector ile rezerve, şimdilik NULL.
-- Auth: Auth.js email magic link. 15 dk kurulum, şifre yok.
-- Ses depolama: Vercel Blob. 30sn mp3 yüklenir, `voice_url` olarak saklanır. Bucket yönetimi yok.
-- Deploy: Vercel + Neon. 10 dk deploy.
+- Web + API: Axum (Rust), `/v1/` altında REST. Askama + HTMX ile server-render, Node yok. Tek repo, tek binary. Bot sonradan aynı endpointleri kullanır.
+- DB: Postgres + sqlx. Row-lock takas transaction + outbox tablosu. `embedding` kolonu pgvector ile rezerve, şimdilik NULL.
+- Auth: email magic link (lettre), imzalı session cookie. Şifre yok.
+- Ses depolama: MVP'de local `./data/voice`, static serve ile `voice_url`. S3 kurulumu yok. API değişmeden sonradan S3-uyumluya taşınır.
+- Deploy: Docker tek binary + Fly.io (herhangi bir Docker host olur).
+- API sözleşmesi: OpenAPI 3.x, RFC 9457 hatalar, swap'te `Idempotency-Key`, cursor sayfalama.
 
 ## Neden
 
 - Modüler monolit korunur: B/C aynı REST + outbox'a takılır, core değişmez.
-- Prisma transaction atomik takası kapsar (iki teklif -> matched).
-- pgvector hazır demek C için migration gerekmez, sadece yeni `EmbeddingMatcher`.
+- sqlx transaction atomik takası kapsar (iki teklif -> matched), `SELECT ... FOR UPDATE` ile.
+- pgvector hazır demek C için migration gerekmez, sadece yeni `EmbeddingMatcher: Matcher` impl.
 
 ## Kapsam Dışı
 

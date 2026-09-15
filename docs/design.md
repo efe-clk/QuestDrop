@@ -1,9 +1,9 @@
 > 🇹🇷 Türkçe için tıklayın: [design.tr.md](./design.tr.md)
 
-# QuestDrop — Design Document
+# QuestDrop — Design Document (Rust)
 
 Date: 2026-09-15
-Status: Draft, awaiting approval
+Status: Draft, Rust stack locked
 
 ## 1. Goal
 
@@ -27,8 +27,8 @@ Single repo, API-first modular monolith. No microservices.
 ```
 
 - Core knows nothing about the outside world. Web and bot use the same REST API.
-- Matching is one interface: `Matcher.match(user, pool) -> ranked_list`. Rule-based now, `EmbeddingMatcher` plugs into the same interface later.
-- Event: simple DB outbox table for `swap.created`. Bot notifications and AI re-ranking listen to it.
+- Matching is one trait: `trait Matcher { fn match(user, pool) -> ranked_list }`. Rule-based now, `EmbeddingMatcher` impl later.
+- Event: simple DB outbox table for `swap.created` (sqlx, polled publisher). Bot notifications and AI re-ranking listen to it.
 - Auth: magic link. Files: link (no S3). Voice: 30s mp3.
 
 ## 4. Components + Data Model

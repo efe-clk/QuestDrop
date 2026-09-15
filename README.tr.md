@@ -1,6 +1,6 @@
 > 🇬🇧 Click for English: [README.md](./README.md)
 
-# QuestDrop
+# QuestDrop (Rust)
 
 Yarım kalmış yan projeleri takas edilebilir quest'lere çevir. Yoruldun mu? Drop et. Başkasının yarım quest'ini al, yenilik dopaminiyle devam et.
 
@@ -14,38 +14,39 @@ Başarı kriteri: tanımadığın insanların açık havuzda takas yapması.
 
 ## Mimari
 
-Tek repo, API-first modüler monolit. Mikroservis yok.
+Tek repo, Rust ile API-first modüler monolit. Mikroservis yok.
 
 ```text
-[Web UI] -> [API Core] -> [DB]
-[Bot]   -> [API Core] (ileride, aynı API)
+[Web UI - Askama+HTMX] -> [API Core - Axum] -> [Postgres+sqlx]
+[Bot] -----------------> [API Core - Axum] (ileride, aynı API)
 ```
 
-- Core dış dünyayı bilmez. Web de bot da aynı REST'i kullanır.
-- Eşleşme tek interface: `Matcher.match(user, pool) -> ranked_list`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` aynı interface ile takılır.
+- Core dış dünyayı bilmez. Web de bot da aynı REST'i kullanır (`/v1/`).
+- Eşleşme tek trait: `trait Matcher { fn match(...) -> ranked_list }`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` impl.
 - Event: `swap.created` için basit DB outbox tablosu. Bot bildirimi ve AI yeniden-sıralama bunu dinler.
-- Auth: magic link. Dosya: link (S3 yok). Ses: 30sn mp3.
+- Auth: email magic link. Dosya: link (S3 yok). Ses: `./data/voice` içinde 30sn mp3.
 
-## Altyapı (kilitli)
+## Altyapı (kilitli - Rust)
 
-- Web + API: Next.js App Router (TypeScript), REST
-- DB: Postgres (Neon) + Prisma, pgvector kolonu hazır (şimdilik NULL)
-- Auth: Auth.js email magic link
-- Ses depolama: Vercel Blob
-- Deploy: Vercel + Neon
+- Web + API: Axum + Askama + HTMX, tek binary
+- DB: Postgres + sqlx, pgvector rezerve
+- Auth: magic link (lettre) + cookie session
+- Ses: local static dosya
+- Deploy: Docker + Fly.io
 
 Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
 
 ## Dökümanlar
 
 - Tasarım (TR): [docs/design.tr.md](./docs/design.tr.md)
+- Plan (TR): [docs/plan.tr.md](./docs/plan.tr.md)
 - Design (EN): [docs/design.md](./docs/design.md)
+- Plan (EN): [docs/plan.md](./docs/plan.md)
 
 ## Hızlı Başlangıç
 
 ```bash
-npm install
-npm run dev
+cargo run
 ```
 
-> İskelet bir sonraki commit'te. Akış için tasarım dokümanına bak.
+> İskelet bir sonraki commit'te. Fazlar için plana bak.
