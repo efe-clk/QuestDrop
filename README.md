@@ -43,6 +43,20 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 - Tasarım (TR): [docs/design.tr.md](./docs/design.tr.md)
 - Plan (TR): [docs/plan.tr.md](./docs/plan.tr.md)
 
+## API
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/`, `/health`, `/ready` | home, liveness+db, readiness probe |
+| GET | `/v1/projects?cursor=&limit=` | OPEN pool, cursor pages (max 50) |
+| POST | `/v1/projects` | drop: validation, 3/day, 10/min per IP |
+| POST | `/v1/users/upsert` | skill profile for matching |
+| GET | `/v1/match?user_id=` | top-3 + 1 surprise (RuleMatcher) |
+| POST | `/v1/swaps` | atomic take; `Idempotency-Key` optional |
+| GET | `/v1/revive?user_id=` | freeze package + first 2-min task |
+| POST | `/v1/reports` | 3 distinct reports auto-hide |
+| GET | `/voice/*` | local mp3 files |
+
 ## Quickstart (5 min)
 
 ```bash

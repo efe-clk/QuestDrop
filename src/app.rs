@@ -24,7 +24,6 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
-    pub limiter: Arc<RateLimiter>,
     pub voice_dir: std::path::PathBuf,
 }
 
@@ -79,9 +78,7 @@ fn db_error(e: DbError) -> Response {
     match e {
         DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
         DbError::NotFound(d) => problem(StatusCode::NOT_FOUND, d).into_response(),
-        DbError::DailyCap => {
-            // Seconds until UTC midnight, when the quota resets.
-            let retry = 86_400 - chrono::Utc::now().timestamp() % 86_400;
+        DbError::DailyCap(retry) => {
             let (status, body) = problem(
                 StatusCode::TOO_MANY_REQUESTS,
                 format!("max {} drops per day", db::MAX_DROPS_PER_DAY),
@@ -468,7 +465,6 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     );
     let state = AppState {
         pool,
-        limiter: drop_limiter.clone(),
         voice_dir: voice_dir.clone(),
     };
     let router = Router::new()

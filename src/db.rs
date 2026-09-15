@@ -14,8 +14,8 @@ pub const MAX_DROPS_PER_DAY: i64 = 3;
 pub enum DbError {
     /// Same email with a different handle (or vice versa): identity conflict.
     Conflict(String),
-    /// Spec §6: max 3 drops per day.
-    DailyCap,
+    /// Spec §6: max 3 drops per day. Carries retry-after seconds.
+    DailyCap(u64),
     /// Unknown id (taker, offer): caller maps to 404.
     NotFound(String),
     /// Internal: unique race lost mid-transaction — caller retries with a
@@ -108,8 +108,19 @@ pub async fn create_drop(pool: &PgPool, v: &ValidatedDrop) -> Result<(Uuid, Uuid
         .fetch_one(&mut *tx)
         .await?;
         if today >= MAX_DROPS_PER_DAY {
+            // Rolling 24h window: retry when the oldest counted drop expires,
+            // so Retry-After matches the actual quota (not UTC midnight).
+            let oldest: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT MIN(created_at) FROM projects WHERE giver_id = $1 AND created_at > now() - interval '1 day'",
+        )
+        .bind(giver)
+        .fetch_one(&mut *tx)
+        .await?;
             tx.rollback().await?;
-            return Err(DbError::DailyCap);
+            let retry = oldest
+                .map(|t| (86_400 - (Utc::now() - t).num_seconds()).max(1) as u64)
+                .unwrap_or(3_600);
+            return Err(DbError::DailyCap(retry));
         }
 
         let project_id: Uuid = sqlx::query_scalar(
@@ -513,27 +524,28 @@ pub async fn create_report(
         .bind(project)
         .fetch_one(&mut *tx)
         .await?;
-    let mut hidden = false;
     if n >= 3 {
-        let closed: u64 = sqlx::query(
+        sqlx::query(
             "UPDATE projects SET status = 'CLOSED' WHERE id = $1 AND status = 'OPEN'::project_status",
         )
         .bind(project)
         .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if closed > 0 {
-            sqlx::query(
-                "UPDATE swap_offers SET status = 'CLOSED' WHERE project_id = $1 AND status = 'OPEN'::offer_status",
-            )
-            .bind(project)
-            .execute(&mut *tx)
-            .await?;
-            hidden = true;
-        }
+        .await?;
+        sqlx::query(
+            "UPDATE swap_offers SET status = 'CLOSED' WHERE project_id = $1 AND status = 'OPEN'::offer_status",
+        )
+        .bind(project)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
-    Ok((report_id, hidden))
+    // Re-read after commit: a concurrent reporter may have closed the
+    // project between our COUNT and commit, so report actual final state.
+    let status: String = sqlx::query_scalar("SELECT status::text FROM projects WHERE id = $1")
+        .bind(project)
+        .fetch_one(pool)
+        .await?;
+    Ok((report_id, status != "OPEN"))
 }
 
 #[derive(Debug, Serialize)]
@@ -610,4 +622,35 @@ pub async fn latest_revive(pool: &PgPool, taker: Uuid) -> Result<Option<Revive>,
         }
         None => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> PoolRow {
+        PoolRow {
+            id: Uuid::nil(),
+            title: "Demo".into(),
+            one_liner: "x".into(),
+            link_url: "https://x.y".into(),
+            voice_url: "/voice/a.mp3".into(),
+            skill_needed: vec!["rust".into()],
+            time_bucket: "S".into(),
+            energy: "LOW".into(),
+            giver_handle: "g".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn first_task_is_two_minutes_and_skill_aware() {
+        let t = first_task_for(&row());
+        assert_eq!(t.minutes, 2);
+        assert_eq!(t.steps.len(), 4);
+        assert!(t.steps[2].contains("rust"));
+        let mut bare = row();
+        bare.skill_needed.clear();
+        assert!(first_task_for(&bare).steps[2].contains("smallest piece"));
+    }
 }

@@ -43,6 +43,20 @@ Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
 - Design (EN): [docs/design.md](./docs/design.md)
 - Plan (EN): [docs/plan.md](./docs/plan.md)
 
+## API
+
+| Metod | Yol | Not |
+|---|---|---|
+| GET | `/`, `/health`, `/ready` | ana sayfa, canlılık+db, readiness probu |
+| GET | `/v1/projects?cursor=&limit=` | OPEN havuz, cursor sayfalı (max 50) |
+| POST | `/v1/projects` | bırakma: validasyon, günde 3, IP başına 10/dk |
+| POST | `/v1/users/upsert` | eşleşme için yetenek profili |
+| GET | `/v1/match?user_id=` | top-3 + 1 sürpriz (RuleMatcher) |
+| POST | `/v1/swaps` | atomik takas; `Idempotency-Key` opsiyonel |
+| GET | `/v1/revive?user_id=` | freeze paketi + ilk 2dk görevi |
+| POST | `/v1/reports` | 3 farklı report oto-gizler |
+| GET | `/voice/*` | local mp3 dosyaları |
+
 ## Hızlı Başlangıç (5 dk)
 
 ```bash
