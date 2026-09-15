@@ -273,6 +273,81 @@ async fn match_returns_ranked_excluding_own() {
 }
 
 #[tokio::test]
+async fn profile_upsert_drives_match_fit() {
+    let _g = lock();
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    // Skills profile first: B can do rust, A posts a rust quest.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/upsert")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "fitter_b", "email": "fitb@x.com",
+                        "can_do": ["rust"], "looking_for": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), 65536).await.unwrap();
+    let uid: String = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["user_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (s, _) = post_drop(&app, drop_json("fitter_a", "fita@x.com", "Rust quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/match?user_id={uid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let items = json["matches"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    // fit = (overlap(can_do=[rust],[rust]) + overlap([],[rust])) / 2 = 0.50
+    assert!(items[0]["reason"].as_str().unwrap().starts_with("fit=0.50"));
+
+    // Same email + different handle stays 409 on profiles too.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/upsert")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "handle": "impostor", "email": "fitb@x.com",
+                        "can_do": [], "looking_for": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;

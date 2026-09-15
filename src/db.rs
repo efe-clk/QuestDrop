@@ -222,3 +222,46 @@ pub async fn match_candidates(
     .fetch_all(pool)
     .await?)
 }
+
+/// Creates or updates a skill profile (used by matching).
+/// Same identity rule as drops: an email keeps its handle, or 409.
+pub async fn upsert_profile(
+    pool: &PgPool,
+    v: &crate::validate::ValidatedProfile,
+) -> Result<Uuid, DbError> {
+    let row = sqlx::query("SELECT id, handle FROM users WHERE email = $1")
+        .bind(&v.email)
+        .fetch_optional(pool)
+        .await?;
+    if let Some(r) = row {
+        let id: Uuid = r.try_get("id")?;
+        let existing: String = r.try_get("handle")?;
+        if existing != v.handle {
+            return Err(DbError::Conflict(
+                "email is already registered with a different handle".into(),
+            ));
+        }
+        sqlx::query("UPDATE users SET can_do = $1, looking_for = $2 WHERE id = $3")
+            .bind(&v.can_do)
+            .bind(&v.looking_for)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        return Ok(id);
+    }
+    sqlx::query_scalar(
+        "INSERT INTO users (handle, email, can_do, looking_for) VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(&v.handle)
+    .bind(&v.email)
+    .bind(&v.can_do)
+    .bind(&v.looking_for)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match &e {
+        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
+            DbError::Conflict("handle or email is already taken".into())
+        }
+        _ => DbError::Db(e),
+    })
+}

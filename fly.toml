@@ -14,5 +14,5 @@ auto_start_machines = true
   grace_period = "10s"
   interval = "30s"
   method = "GET"
-  path = "/health"
+  path = "/ready"
   timeout = "5s"

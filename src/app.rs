@@ -24,7 +24,7 @@ use crate::{
     db::{self, DbError},
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
-    validate::{RawDrop, validate_drop},
+    validate::{RawDrop, RawProfile, validate_drop, validate_profile},
 };
 
 #[derive(Clone)]
@@ -136,9 +136,16 @@ struct PoolQuery {
     limit: Option<i64>,
 }
 
-async fn list_projects(State(s): State<AppState>, Query(q): Query<PoolQuery>) -> Response {
+async fn list_projects(
+    State(s): State<AppState>,
+    q: Result<Query<PoolQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
     let Some(pool) = &s.pool else {
         return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(e) => return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response(),
     };
     let limit = q.limit.unwrap_or(20).clamp(1, 50);
     match db::list_pool(pool, q.cursor, limit).await {
@@ -225,6 +232,54 @@ async fn create_project(
     }
 }
 
+async fn upsert_profile(
+    State(s): State<AppState>,
+    raw: Result<Json<RawProfile>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let raw = match raw {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
+        }
+    };
+    let valid = match validate_profile(&raw) {
+        Ok(v) => v,
+        Err(errs) => {
+            return problem_errors(StatusCode::BAD_REQUEST, "invalid profile", errs).into_response();
+        }
+    };
+    match db::upsert_profile(pool, &valid).await {
+        Ok(user_id) => Json(serde_json::json!({ "user_id": user_id })).into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
+/// Readiness (for orchestrator checks): 503 unless the database answers.
+/// Liveness stays on `/health`, which is always 200 with a `db` field.
+async fn ready(State(s): State<AppState>) -> Response {
+    match &s.pool {
+        Some(p) => match sqlx::query("SELECT 1 AS one").fetch_one(p).await {
+            Ok(_) => Json(serde_json::json!({ "ready": true })).into_response(),
+            Err(e) => {
+                tracing::error!(error = %e, "readiness check failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "ready": false })),
+                )
+                    .into_response()
+            }
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ready": false })),
+        )
+            .into_response(),
+    }
+}
+
 /// 10 drops/min per IP on the write endpoint (spam-flood guard until auth).
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
@@ -280,10 +335,18 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     let router = Router::new()
         .route("/", get(index))
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/v1/projects", get(list_projects))
         .route(
             "/v1/projects",
             post(create_project).route_layer(middleware::from_fn_with_state(
+                limiter.clone(),
+                posts_limit,
+            )),
+        )
+        .route(
+            "/v1/users/upsert",
+            post(upsert_profile).route_layer(middleware::from_fn_with_state(
                 limiter,
                 posts_limit,
             )),

@@ -144,6 +144,64 @@ pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct RawProfile {
+    pub handle: String,
+    pub email: String,
+    pub can_do: Vec<String>,
+    pub looking_for: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct ValidatedProfile {
+    pub handle: String,
+    pub email: String,
+    pub can_do: Vec<String>,
+    pub looking_for: Vec<String>,
+}
+
+fn clean_skills(raw: &[String], errs: &mut Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = raw
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out.truncate(20);
+    if out.iter().any(|s| s.chars().count() > 32) {
+        errs.push("each skill must be 1-32 chars".into());
+    }
+    out
+}
+
+/// Skill profile for matching. Without this every user has empty skills and
+/// the matcher degrades to pure random — this endpoint keeps fit meaningful.
+pub fn validate_profile(r: &RawProfile) -> Result<ValidatedProfile, Vec<String>> {
+    let mut errs: Vec<String> = Vec::new();
+    let handle = r.handle.trim().to_string();
+    if !valid_handle(&handle) {
+        errs.push("handle must be 3-24 chars: lowercase letters, digits, underscore".into());
+    }
+    let email = r.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        errs.push("email is invalid".into());
+    }
+    let can_do = clean_skills(&r.can_do, &mut errs);
+    let looking_for = clean_skills(&r.looking_for, &mut errs);
+    if errs.is_empty() {
+        Ok(ValidatedProfile {
+            handle,
+            email,
+            can_do,
+            looking_for,
+        })
+    } else {
+        Err(errs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
