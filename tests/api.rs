@@ -405,6 +405,252 @@ async fn concurrent_drops_hold_cap_without_5xx() {
     assert_eq!(users, 1, "one identity despite the insert race");
 }
 
+async fn post_swap(
+    app: &axum::Router,
+    body: serde_json::Value,
+    key: Option<&str>,
+) -> (StatusCode, serde_json::Value, bool) {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/v1/swaps")
+        .header("content-type", "application/json");
+    if let Some(k) = key {
+        b = b.header("idempotency-key", k);
+    }
+    let res = app
+        .clone()
+        .oneshot(b.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let replayed = res.headers().get("idempotent-replayed").is_some();
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    (status, json, replayed)
+}
+
+fn swap_json(taker: &str, give: &str, take: &str) -> serde_json::Value {
+    serde_json::json!({"taker_id": taker, "give_offer_id": give, "take_offer_id": take})
+}
+
+/// Two users with one OPEN offer each. Returns (uid_b, offer_b, offer_a).
+async fn seed_swap_pair(app: &axum::Router, pool: &PgPool, tag: &str) -> (String, String, String) {
+    let (s, _) = post_drop(
+        app,
+        drop_json(
+            &format!("sw_a_{tag}"),
+            &format!("swa{tag}@x.com"),
+            "A quest",
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _) = post_drop(
+        app,
+        drop_json(
+            &format!("sw_b_{tag}"),
+            &format!("swb{tag}@x.com"),
+            "B quest",
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let uid_b: String = sqlx::query_scalar(&format!(
+        "SELECT id::text FROM users WHERE handle='sw_b_{tag}'"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let offer_b: String = sqlx::query_scalar(&format!(
+        "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_b_{tag}'"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let offer_a: String = sqlx::query_scalar(&format!(
+        "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_a_{tag}'"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (uid_b, offer_b, offer_a)
+}
+
+#[tokio::test]
+async fn swap_201_freezes_both_sides() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s1").await;
+
+    let (s, json, replayed) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    assert_eq!(s, StatusCode::CREATED, "body: {json}");
+    assert!(!replayed);
+    assert!(json.get("match_id").is_some());
+
+    let (offers, projects, matches, events): (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM swap_offers WHERE status='MATCHED'::offer_status),
+                (SELECT COUNT(*) FROM projects WHERE status='MATCHED'::project_status),
+                (SELECT COUNT(*) FROM matches),
+                (SELECT COUNT(*) FROM outbox_events WHERE type='swap.completed')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((offers, projects, matches, events), (2, 2, 1, 1));
+}
+
+#[tokio::test]
+async fn swap_double_claim_409() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s2").await;
+
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    assert_eq!(s, StatusCode::CREATED);
+    // Same take again with a fresh giver -> taken already.
+    let (s, _) = post_drop(&app, drop_json("sw_c_s2", "swcs2@x.com", "C quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let uid_c: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='sw_c_s2'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let offer_c: String = sqlx::query_scalar(
+        "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_c_s2'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, _, _) = post_swap(&app, swap_json(&uid_c, &offer_c, &offer_a), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // Replaying your own matched give -> also 409.
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn swap_replay_returns_stored_200() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s3").await;
+
+    let (s1, j1, r1) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        Some("key-s3-abc"),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::CREATED);
+    assert!(!r1);
+    let (s2, j2, r2) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        Some("key-s3-abc"),
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+    assert!(r2);
+    assert_eq!(j1["match_id"], j2["match_id"]);
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM matches")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "replay must not execute twice");
+}
+
+#[tokio::test]
+async fn swap_rules_4xx() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s4").await;
+
+    // give == take
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_b), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // give is not yours
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_a, &offer_b), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // unknown taker / unknown offer
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json("00000000-0000-0000-0000-000000000000", &offer_b, &offer_a),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, "00000000-0000-0000-0000-000000000000"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // oversized key
+    let (s, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        Some(&"k".repeat(65)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn swap_race_single_winner() {
+    // 5 takers race for one offer: exactly one 201, rest 409, zero 5xx.
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (_, _, offer_a) = seed_swap_pair(&app, &pool, "s5").await;
+    let mut giver_offers = Vec::new();
+    for i in 0..5 {
+        let h = format!("racer_s5_{i}");
+        let (s, _) = post_drop(&app, drop_json(&h, &format!("rs5{i}@x.com"), "Racer")).await;
+        assert_eq!(s, StatusCode::CREATED);
+        let uid: String =
+            sqlx::query_scalar(&format!("SELECT id::text FROM users WHERE handle='{h}'"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let offer: String = sqlx::query_scalar(&format!(
+            "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='{h}'"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        giver_offers.push((uid, offer));
+    }
+    let mut tasks = Vec::new();
+    for (uid, offer) in giver_offers {
+        let app = app.clone();
+        let take = offer_a.clone();
+        tasks.push(tokio::spawn(async move {
+            post_swap(&app, swap_json(&uid, &offer, &take), None)
+                .await
+                .0
+        }));
+    }
+    let mut won = 0;
+    let mut lost = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            StatusCode::CREATED => won += 1,
+            StatusCode::CONFLICT => lost += 1,
+            s => panic!("unexpected status in swap race: {s}"),
+        }
+    }
+    assert_eq!(won, 1);
+    assert_eq!(lost, 4);
+}
+
 #[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);

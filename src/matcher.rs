@@ -49,6 +49,15 @@ fn overlap(a: &[String], b: &[String]) -> f64 {
     hits as f64 / a.len().max(b.len()) as f64
 }
 
+/// Deterministic skill fit in 0..=1 (the 80% part of the score, no random).
+/// Used for swap records so a match keeps an explainable score.
+pub fn fit_score(user: &QuestUser, item: &PoolItem) -> f64 {
+    let fit = (overlap(&user.can_do, &item.skill_needed)
+        + overlap(&user.looking_for, &item.skill_needed))
+        / 2.0;
+    (fit * 100.0).round() / 100.0
+}
+
 impl Matcher for RuleMatcher {
     fn match_items(&self, user: &QuestUser, pool: &[PoolItem]) -> Vec<RankedItem> {
         let mut rng = rand::thread_rng();
@@ -56,9 +65,7 @@ impl Matcher for RuleMatcher {
             .iter()
             .filter(|p| p.id != user.id)
             .map(|p| {
-                let fit = (overlap(&user.can_do, &p.skill_needed)
-                    + overlap(&user.looking_for, &p.skill_needed))
-                    / 2.0;
+                let fit = fit_score(user, p);
                 let rand_v: f64 = rng.gen();
                 let score = ((fit * 0.8 + rand_v * 0.2) * 100.0).round() / 100.0;
                 RankedItem {

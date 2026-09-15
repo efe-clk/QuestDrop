@@ -78,6 +78,7 @@ fn problem_errors(
 fn db_error(e: DbError) -> Response {
     match e {
         DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
+        DbError::NotFound(d) => problem(StatusCode::NOT_FOUND, d).into_response(),
         DbError::DailyCap => {
             // Seconds until UTC midnight, when the quota resets.
             let retry = 86_400 - chrono::Utc::now().timestamp() % 86_400;
@@ -303,6 +304,64 @@ fn client_ip(req: &Request<axum::body::Body>, conn: Option<ConnectInfo<SocketAdd
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap())
 }
 
+#[derive(Deserialize)]
+struct SwapRequest {
+    taker_id: uuid::Uuid,
+    give_offer_id: uuid::Uuid,
+    take_offer_id: uuid::Uuid,
+}
+
+async fn create_swap(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    raw: Result<Json<SwapRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let raw = match raw {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
+        }
+    };
+    let key: Option<String> = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(k) = &key {
+        if k.len() > 64 {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "idempotency-key must be 1-64 chars",
+            )
+            .into_response();
+        }
+    }
+    match db::create_swap(
+        pool,
+        raw.taker_id,
+        raw.give_offer_id,
+        raw.take_offer_id,
+        key.as_deref(),
+    )
+    .await
+    {
+        Ok((status, body)) => {
+            let mut res = (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
+            if status == 200 {
+                res.headers_mut().insert(
+                    axum::http::HeaderName::from_static("idempotent-replayed"),
+                    HeaderValue::from_static("true"),
+                );
+            }
+            res
+        }
+        Err(e) => db_error(e),
+    }
+}
+
 /// 10 writes/min per IP on the write endpoints (spam-flood guard until auth).
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
@@ -345,6 +404,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     // Separate budgets: spamming profiles must not eat the drop quota.
     let drop_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let profile_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let swap_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let voice_dir = std::path::PathBuf::from(
         std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
     );
@@ -369,6 +429,11 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
                 .route_layer(middleware::from_fn_with_state(profile_limiter, posts_limit)),
         )
         .route("/v1/match", get(match_pool))
+        .route(
+            "/v1/swaps",
+            post(create_swap)
+                .route_layer(middleware::from_fn_with_state(swap_limiter, posts_limit)),
+        )
         .nest_service("/voice", ServeDir::new(&voice_dir))
         .fallback(fallback_404);
     security_headers(router).with_state(state)

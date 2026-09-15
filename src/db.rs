@@ -2,7 +2,7 @@
 //! Drop = one transaction: user + project(OPEN) + swap_offer(OPEN) + outbox event.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -16,6 +16,8 @@ pub enum DbError {
     Conflict(String),
     /// Spec §6: max 3 drops per day.
     DailyCap,
+    /// Unknown id (taker, offer): caller maps to 404.
+    NotFound(String),
     /// Internal: unique race lost mid-transaction — caller retries with a
     /// FRESH transaction (a 23505 poisons the current one: Postgres aborts
     /// it, so re-querying inside it always fails).
@@ -274,4 +276,190 @@ pub async fn upsert_profile(
         }
         _ => DbError::Db(e),
     })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SwapBody {
+    pub match_id: uuid::Uuid,
+    pub give_offer_id: uuid::Uuid,
+    pub take_offer_id: uuid::Uuid,
+    pub project_given: uuid::Uuid,
+    pub project_taken: uuid::Uuid,
+    pub score: f64,
+}
+
+struct OfferRow {
+    id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    giver_id: uuid::Uuid,
+    status: String,
+}
+
+/// Atomic swap: both offers (and their projects) go OPEN -> MATCHED, one
+/// match row + one outbox `swap.completed` event. Rows are locked in id
+/// order so concurrent swaps cannot deadlock or double-claim.
+/// Returns (http_status, body): 201 fresh, 200 idempotent replay.
+pub async fn create_swap(
+    pool: &PgPool,
+    taker: Uuid,
+    give_offer: Uuid,
+    take_offer: Uuid,
+    idem_key: Option<&str>,
+) -> Result<(u16, SwapBody), DbError> {
+    if give_offer == take_offer {
+        return Err(DbError::Conflict("give and take offers must differ".into()));
+    }
+    if !sqlx::query("SELECT 1 FROM users WHERE id = $1")
+        .bind(taker)
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Err(DbError::NotFound("unknown taker".into()));
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // Idempotency gate INSIDE the tx: the PK serializes concurrent replays.
+    // A placeholder row reserves the key; a conflict means replay.
+    if let Some(key) = idem_key {
+        let inserted: bool = sqlx::query_scalar(
+            "INSERT INTO idempotency_keys (key, taker_id, status_code, body)
+             VALUES ($1, $2, 0, '{}') ON CONFLICT DO NOTHING RETURNING TRUE",
+        )
+        .bind(key)
+        .bind(taker)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        if !inserted {
+            let row =
+                sqlx::query("SELECT body FROM idempotency_keys WHERE key = $1 AND taker_id = $2")
+                    .bind(key)
+                    .bind(taker)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            tx.rollback().await?;
+            let stored: sqlx::types::Json<serde_json::Value> = row.try_get("body")?;
+            let body: SwapBody = serde_json::from_value(stored.0).map_err(|e| {
+                DbError::Db(sqlx::Error::Decode(
+                    format!("stored swap body corrupt: {e}").into(),
+                ))
+            })?;
+            // Replay answers 200 (Stripe convention) with the identical body;
+            // the stored 201 stays as the record of the original execution.
+            return Ok((200, body));
+        }
+    }
+
+    let rows: Vec<OfferRow> = sqlx::query(
+        "SELECT id, project_id, giver_id, status::text AS status FROM swap_offers
+         WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+    )
+    .bind([give_offer, take_offer])
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|r| {
+        Ok::<_, sqlx::Error>(OfferRow {
+            id: r.try_get("id")?,
+            project_id: r.try_get("project_id")?,
+            giver_id: r.try_get("giver_id")?,
+            status: r.try_get("status")?,
+        })
+    })
+    .collect::<Result<_, _>>()?;
+    if rows.len() != 2 {
+        tx.rollback().await?;
+        return Err(DbError::NotFound("offer not found".into()));
+    }
+    let give = rows.iter().find(|o| o.id == give_offer).unwrap();
+    let take = rows.iter().find(|o| o.id == take_offer).unwrap();
+    if give.status != "OPEN" || take.status != "OPEN" {
+        tx.rollback().await?;
+        return Err(DbError::Conflict("offer is no longer open".into()));
+    }
+    if give.giver_id != taker {
+        tx.rollback().await?;
+        return Err(DbError::Conflict("give offer is not yours".into()));
+    }
+    if take.giver_id == taker {
+        tx.rollback().await?;
+        return Err(DbError::Conflict("cannot take your own project".into()));
+    }
+
+    // Deterministic fit between taker skills and the taken project.
+    let taker_skills: (Vec<String>, Vec<String>) =
+        sqlx::query_as("SELECT can_do, looking_for FROM users WHERE id = $1")
+            .bind(taker)
+            .fetch_one(&mut *tx)
+            .await?;
+    let taken_skills: Vec<String> =
+        sqlx::query_scalar("SELECT skill_needed FROM projects WHERE id = $1")
+            .bind(take.project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let score = crate::matcher::fit_score(
+        &crate::matcher::QuestUser {
+            id: String::new(),
+            can_do: taker_skills.0,
+            looking_for: taker_skills.1,
+        },
+        &crate::matcher::PoolItem {
+            id: String::new(),
+            skill_needed: taken_skills,
+            time_bucket: String::new(),
+            energy: String::new(),
+        },
+    );
+
+    sqlx::query("UPDATE swap_offers SET status = 'MATCHED' WHERE id = ANY($1)")
+        .bind([give_offer, take_offer])
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE projects SET status = 'MATCHED' WHERE id = ANY($1)")
+        .bind([give.project_id, take.project_id])
+        .execute(&mut *tx)
+        .await?;
+    let match_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO matches (taker_id, given_id, taken_id, score, reason)
+         VALUES ($1, $2, $3, $4, 'manual swap') RETURNING id",
+    )
+    .bind(taker)
+    .bind(give.project_id)
+    .bind(take.project_id)
+    .bind(score)
+    .fetch_one(&mut *tx)
+    .await?;
+    let body = SwapBody {
+        match_id,
+        give_offer_id: give_offer,
+        take_offer_id: take_offer,
+        project_given: give.project_id,
+        project_taken: take.project_id,
+        score,
+    };
+    let payload = serde_json::json!({
+        "match_id": match_id,
+        "give_offer_id": give_offer,
+        "take_offer_id": take_offer,
+        "taker_id": taker,
+    });
+    sqlx::query("INSERT INTO outbox_events (type, payload) VALUES ('swap.completed', $1)")
+        .bind(sqlx::types::Json(payload))
+        .execute(&mut *tx)
+        .await?;
+    if let Some(key) = idem_key {
+        sqlx::query(
+            "UPDATE idempotency_keys SET status_code = 201, body = $1 WHERE key = $2 AND taker_id = $3",
+        )
+        .bind(sqlx::types::Json(&body))
+        .bind(key)
+        .bind(taker)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok((201, body))
 }
