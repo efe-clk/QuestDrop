@@ -404,8 +404,11 @@ async fn create_swap(
     .await
     {
         Ok((status, body)) => {
-            let mut res = (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
-            if status == 200 {
+            // Stored replay codes come from our own writes (200/201); a
+            // corrupt row degrades to 500 instead of panicking the task.
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut res = (code, Json(body)).into_response();
+            if code == StatusCode::OK {
                 res.headers_mut().insert(
                     axum::http::HeaderName::from_static("idempotent-replayed"),
                     HeaderValue::from_static("true"),

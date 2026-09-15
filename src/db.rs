@@ -397,8 +397,12 @@ pub async fn create_swap(
         tx.rollback().await?;
         return Err(DbError::NotFound("offer not found".into()));
     }
-    let give = rows.iter().find(|o| o.id == give_offer).unwrap();
-    let take = rows.iter().find(|o| o.id == take_offer).unwrap();
+    let give = rows.iter().find(|o| o.id == give_offer);
+    let take = rows.iter().find(|o| o.id == take_offer);
+    let (Some(give), Some(take)) = (give, take) else {
+        tx.rollback().await?;
+        return Err(DbError::NotFound("offer not found".into()));
+    };
     if give.status != "OPEN" || take.status != "OPEN" {
         tx.rollback().await?;
         return Err(DbError::Conflict("offer is no longer open".into()));
