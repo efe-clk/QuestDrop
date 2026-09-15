@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TimeBucket {
+  S
+  M
+  L
+}
+
+enum Energy {
+  LOW
+  MID
+  HIGH
+}
+
+enum ProjectStatus {
+  OPEN
+  MATCHED
+  CLOSED
+}
+
+enum OfferStatus {
+  OPEN
+  MATCHED
+  CLOSED
+}
+
+model User {
+  id          String   @id @default(cuid())
+  handle      String   @unique
+  email       String   @unique
+  canDo       String[] @default([])
+  lookingFor  String[] @default([])
+  projects    Project[] @relation("Giver")
+  offers      SwapOffer[]
+  reports     Report[]
+  createdAt   DateTime @default(now())
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  title       String
+  oneLiner    String
+  linkUrl     String
+  voiceUrl    String
+  skillNeeded String[]      @default([])
+  timeBucket  TimeBucket
+  energy      Energy
+  status      ProjectStatus @default(OPEN)
+  // Embedding port for C: pgvector later. Json placeholder keeps column reserved.
+  embedding   Json?
+  giverId     String
+  giver       User          @relation("Giver", fields: [giverId], references: [id])
+  offers      SwapOffer[]
+  reports     Report[]
+  createdAt   DateTime      @default(now())
+}
+
+model SwapOffer {
+  id        String      @id @default(cuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id])
+  giverId   String
+  giver     User        @relation(fields: [giverId], references: [id])
+  status    OfferStatus @default(OPEN)
+  createdAt DateTime    @default(now())
+
+  @@index([status])
+}
+
+model Match {
+  id        String   @id @default(cuid())
+  takerId   String
+  givenId   String?
+  takenId   String
+  score     Float
+  reason    String?
+  createdAt DateTime @default(now())
+}
+
+model OutboxEvent {
+  id        String   @id @default(cuid())
+  type      String
+  payload   Json
+  processed Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([processed])
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id])
+  reporterId String
+  reporter  User     @relation(fields: [reporterId], references: [id])
+  reason    String
+  createdAt DateTime @default(now())
+}
