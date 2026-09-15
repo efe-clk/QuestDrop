@@ -595,9 +595,10 @@ pub fn first_task_for(project: &PoolRow) -> FirstTask {
     }
 }
 
-/// Latest completed swap for a taker + its freeze package + first task.
-pub async fn latest_revive(pool: &PgPool, taker: Uuid) -> Result<Option<Revive>, DbError> {
-    let row = sqlx::query(
+/// All completed swaps for a taker, newest first — each with its freeze
+/// package + first task. Latest-only would strand older quests.
+pub async fn all_revives(pool: &PgPool, taker: Uuid) -> Result<Vec<Revive>, DbError> {
+    let rows = sqlx::query(
         "SELECT m.id AS match_id, m.created_at AS matched_at,
                 p.id, p.title, p.one_liner, p.link_url, p.voice_url, p.skill_needed,
                 p.time_bucket::text AS time_bucket, p.energy::text AS energy,
@@ -606,35 +607,34 @@ pub async fn latest_revive(pool: &PgPool, taker: Uuid) -> Result<Option<Revive>,
          JOIN projects p ON p.id = m.taken_id
          JOIN users u ON u.id = p.giver_id
          WHERE m.taker_id = $1
-         ORDER BY m.created_at DESC, m.id DESC LIMIT 1",
+         ORDER BY m.created_at DESC, m.id DESC",
     )
     .bind(taker)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(match row {
-        Some(r) => {
-            let project = PoolRow {
-                id: r.try_get("id")?,
-                title: r.try_get("title")?,
-                one_liner: r.try_get("one_liner")?,
-                link_url: r.try_get("link_url")?,
-                voice_url: r.try_get("voice_url")?,
-                skill_needed: r.try_get("skill_needed")?,
-                time_bucket: r.try_get("time_bucket")?,
-                energy: r.try_get("energy")?,
-                giver_handle: r.try_get("giver_handle")?,
-                created_at: r.try_get("created_at")?,
-            };
-            let task = first_task_for(&project);
-            Some(Revive {
-                match_id: r.try_get("match_id")?,
-                matched_at: r.try_get("matched_at")?,
-                project,
-                first_task: task,
-            })
-        }
-        None => None,
-    })
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let project = PoolRow {
+            id: r.try_get("id")?,
+            title: r.try_get("title")?,
+            one_liner: r.try_get("one_liner")?,
+            link_url: r.try_get("link_url")?,
+            voice_url: r.try_get("voice_url")?,
+            skill_needed: r.try_get("skill_needed")?,
+            time_bucket: r.try_get("time_bucket")?,
+            energy: r.try_get("energy")?,
+            giver_handle: r.try_get("giver_handle")?,
+            created_at: r.try_get("created_at")?,
+        };
+        let task = first_task_for(&project);
+        out.push(Revive {
+            match_id: r.try_get("match_id")?,
+            matched_at: r.try_get("matched_at")?,
+            project,
+            first_task: task,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

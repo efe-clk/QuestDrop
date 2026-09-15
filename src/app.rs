@@ -381,9 +381,11 @@ async fn revive(
     let Some(uid) = q.user_id else {
         return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
     };
-    match db::latest_revive(pool, uid).await {
-        Ok(Some(pkg)) => Json(pkg).into_response(),
-        Ok(None) => problem(StatusCode::NOT_FOUND, "no completed swaps yet").into_response(),
+    match db::all_revives(pool, uid).await {
+        Ok(list) if !list.is_empty() => {
+            Json(serde_json::json!({ "revives": list })).into_response()
+        }
+        Ok(_) => problem(StatusCode::NOT_FOUND, "no completed swaps yet").into_response(),
         Err(e) => db_error(e),
     }
 }

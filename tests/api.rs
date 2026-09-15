@@ -784,6 +784,25 @@ async fn revive_returns_package_and_task() {
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "rv").await;
     let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b, &offer_a), None).await;
     assert_eq!(s, StatusCode::CREATED);
+    // Same taker takes again: history keeps both revives, newest first.
+    let (s, _) = post_drop(&app, drop_json("sw_c_rv", "swcrv@x.com", "Second")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let offer_c: String = sqlx::query_scalar(
+        "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_c_rv'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, _) = post_drop(&app, drop_json("sw_b_rv", "swbrv@x.com", "B quest 2")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let offer_b2: String = sqlx::query_scalar(
+        "SELECT o.id::text FROM swap_offers o JOIN projects p ON p.id=o.project_id WHERE p.title='B quest 2'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, _, _) = post_swap(&app, swap_json(&uid_b, &offer_b2, &offer_c), None).await;
+    assert_eq!(s, StatusCode::CREATED);
 
     let res = app
         .clone()
@@ -798,9 +817,15 @@ async fn revive_returns_package_and_task() {
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["project"]["title"], "A quest");
-    assert_eq!(json["first_task"]["minutes"], 2);
-    assert_eq!(json["first_task"]["steps"].as_array().unwrap().len(), 4);
+    let revives = json["revives"].as_array().unwrap();
+    assert_eq!(revives.len(), 2);
+    assert_eq!(revives[0]["project"]["title"], "Second");
+    assert_eq!(revives[1]["project"]["title"], "A quest");
+    assert_eq!(revives[0]["first_task"]["minutes"], 2);
+    assert_eq!(
+        revives[0]["first_task"]["steps"].as_array().unwrap().len(),
+        4
+    );
 
     // Giver with no takes + unknown user -> 404.
     let uid_a: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='sw_a_rv'")

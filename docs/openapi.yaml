@@ -1,0 +1,192 @@
+openapi: 3.0.3
+info:
+  title: QuestDrop API
+  version: 1.0.0
+  description: >
+    Trade half-finished quests. Single modular-monolith binary; the bot (B)
+    reuses these exact endpoints. Errors follow RFC 9457 (Problem Details).
+servers:
+  - url: http://localhost:3000
+paths:
+  /:
+    get:
+      summary: Home page (Askama HTML with pool count)
+      responses:
+        '200':
+          description: html
+  /voice/{file}:
+    get:
+      summary: Local static mp3 files
+      parameters:
+        - {name: file, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: mp3 bytes
+        '404':
+          description: no such file
+  /health:
+    get:
+      summary: Liveness + database state (always 200)
+      responses:
+        '200':
+          description: ok
+  /ready:
+    get:
+      summary: Readiness probe (503 unless the database answers)
+      responses:
+        '200':
+          description: ready
+        '503':
+          description: not ready
+  /v1/projects:
+    get:
+      summary: OPEN pool, newest first, cursor pages (limit default 20, max 50)
+      parameters:
+        - {name: cursor, in: query, schema: {type: string, format: uuid}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        '200':
+          description: pool page + next_cursor
+        '400':
+          $ref: '#/components/responses/Problem'
+    post:
+      summary: Drop a quest (validation, 3/day per giver, 10/min per IP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Drop'
+      responses:
+        '201':
+          description: frozen (project + open offer + outbox event)
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+  /v1/users/upsert:
+    post:
+      summary: Create or update a skill profile (drives match fit)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Profile'
+      responses:
+        '200':
+          description: user_id
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /v1/match:
+    get:
+      summary: Top-3 + 1 surprise from the OPEN pool (RuleMatcher)
+      parameters:
+        - {name: user_id, in: query, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: ranked matches
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /v1/swaps:
+    post:
+      summary: Atomic take (both sides OPEN→MATCHED + match row + outbox)
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: {type: string, maxLength: 64}
+          description: Same key + same body replays stored 200; same key + different body is 400
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Swap'
+      responses:
+        '201':
+          description: swapped
+        '200':
+          description: 'idempotent replay (Idempotent-Replayed: true)'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /v1/revive:
+    get:
+      summary: All completed takes, newest first, with freeze package + first 2-min task
+      parameters:
+        - {name: user_id, in: query, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: revives list
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /v1/reports:
+    post:
+      summary: Report a project (3 distinct reports auto-hide it)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Report'
+      responses:
+        '201':
+          description: recorded (+hidden flag)
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+components:
+  responses:
+    Problem:
+      description: RFC 9457 problem object
+  schemas:
+    Drop:
+      type: object
+      required: [handle, email, title, one_liner, link_url, voice_url, time_bucket, energy]
+      properties:
+        handle: {type: string}
+        email: {type: string}
+        title: {type: string}
+        one_liner: {type: string}
+        link_url: {type: string}
+        voice_url: {type: string, description: '/voice/*.mp3 path or http(s) mp3 URL'}
+        skill_needed: {type: array, items: {type: string}}
+        time_bucket: {type: string, enum: [S, M, L]}
+        energy: {type: string, enum: [LOW, MID, HIGH]}
+    Profile:
+      type: object
+      required: [handle, email]
+      properties:
+        handle: {type: string}
+        email: {type: string}
+        can_do: {type: array, items: {type: string}}
+        looking_for: {type: array, items: {type: string}}
+    Swap:
+      type: object
+      required: [taker_id, give_offer_id, take_offer_id]
+      properties:
+        taker_id: {type: string, format: uuid}
+        give_offer_id: {type: string, format: uuid}
+        take_offer_id: {type: string, format: uuid}
+    Report:
+      type: object
+      required: [reporter_id, project_id, reason]
+      properties:
+        reporter_id: {type: string, format: uuid}
+        project_id: {type: string, format: uuid}
+        reason: {type: string, minLength: 10, maxLength: 300}
