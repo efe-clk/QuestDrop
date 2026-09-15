@@ -78,6 +78,7 @@ fn db_error(e: DbError) -> Response {
     match e {
         DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
         DbError::NotFound(d) => problem(StatusCode::NOT_FOUND, d).into_response(),
+        DbError::BadRequest(d) => problem(StatusCode::BAD_REQUEST, d).into_response(),
         DbError::DailyCap(retry) => {
             let (status, body) = problem(
                 StatusCode::TOO_MANY_REQUESTS,

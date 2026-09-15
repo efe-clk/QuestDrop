@@ -18,6 +18,8 @@ pub enum DbError {
     DailyCap(u64),
     /// Unknown id (taker, offer): caller maps to 404.
     NotFound(String),
+    /// Malformed-but-parseable client error: caller maps to 400.
+    BadRequest(String),
     /// Internal: unique race lost mid-transaction — caller retries with a
     /// FRESH transaction (a 23505 poisons the current one: Postgres aborts
     /// it, so re-querying inside it always fails).
@@ -332,25 +334,36 @@ pub async fn create_swap(
     let mut tx = pool.begin().await?;
 
     // Idempotency gate INSIDE the tx: the PK serializes concurrent replays.
-    // A placeholder row reserves the key; a conflict means replay.
+    // A placeholder row reserves the key; a conflict means replay — but only
+    // for the IDENTICAL request (Stripe rule): same key + different params
+    // is a client bug and must fail, not replay someone else's result.
+    let req_json = serde_json::json!({"taker_id": taker, "give_offer_id": give_offer, "take_offer_id": take_offer});
     if let Some(key) = idem_key {
         let inserted: bool = sqlx::query_scalar(
-            "INSERT INTO idempotency_keys (key, taker_id, status_code, body)
-             VALUES ($1, $2, 0, '{}') ON CONFLICT DO NOTHING RETURNING TRUE",
+            "INSERT INTO idempotency_keys (key, taker_id, status_code, body, req)
+             VALUES ($1, $2, 0, '{}', $3) ON CONFLICT DO NOTHING RETURNING TRUE",
         )
         .bind(key)
         .bind(taker)
+        .bind(sqlx::types::Json(&req_json))
         .fetch_optional(&mut *tx)
         .await?
         .unwrap_or(false);
         if !inserted {
-            let row =
-                sqlx::query("SELECT body FROM idempotency_keys WHERE key = $1 AND taker_id = $2")
-                    .bind(key)
-                    .bind(taker)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let row = sqlx::query(
+                "SELECT body, req FROM idempotency_keys WHERE key = $1 AND taker_id = $2",
+            )
+            .bind(key)
+            .bind(taker)
+            .fetch_one(&mut *tx)
+            .await?;
             tx.rollback().await?;
+            let stored_req: sqlx::types::Json<serde_json::Value> = row.try_get("req")?;
+            if stored_req.0 != req_json {
+                return Err(DbError::BadRequest(
+                    "idempotency-key already used with different parameters".into(),
+                ));
+            }
             let stored: sqlx::types::Json<serde_json::Value> = row.try_get("body")?;
             let body: SwapBody = serde_json::from_value(stored.0).map_err(|e| {
                 DbError::Db(sqlx::Error::Decode(

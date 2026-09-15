@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Build Plan
 
-Status: Phase 0-3 done, Phase 4 revive+moderation done (26 tests green).
+Status: Phase 0-4 done, round 8 hardening (28 tests green).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 

@@ -822,6 +822,43 @@ async fn revive_returns_package_and_task() {
 }
 
 #[tokio::test]
+async fn swap_key_reuse_with_different_params_400() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s6").await;
+    let (s, _) = post_drop(&app, drop_json("sw_c_s6", "swcs6@x.com", "C quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let offer_c: String = sqlx::query_scalar(
+        "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_c_s6'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (s1, _, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_a),
+        Some("key-s6-dup"),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::CREATED);
+    // Same key, different take -> must fail, never replay another result.
+    let (s2, j2, _) = post_swap(
+        &app,
+        swap_json(&uid_b, &offer_b, &offer_c),
+        Some("key-s6-dup"),
+    )
+    .await;
+    assert_eq!(s2, StatusCode::BAD_REQUEST);
+    assert!(j2["detail"]
+        .as_str()
+        .unwrap()
+        .contains("different parameters"));
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;
