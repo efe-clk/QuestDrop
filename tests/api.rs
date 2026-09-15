@@ -362,6 +362,50 @@ async fn profile_upsert_drives_match_fit() {
 }
 
 #[tokio::test]
+async fn concurrent_drops_hold_cap_without_5xx() {
+    // 10 parallel first-drops, one identity: exactly 3 win (201), the rest
+    // get 429 — and no 503 from aborted-transaction retries.
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    let mut tasks = Vec::new();
+    for i in 0..10 {
+        let app = app.clone();
+        tasks.push(tokio::spawn(async move {
+            post_drop(
+                &app,
+                drop_json("racer", "racer@x.com", &format!("Race {i}")),
+            )
+            .await
+            .0
+        }));
+    }
+    let mut created = 0;
+    let mut capped = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            StatusCode::CREATED => created += 1,
+            StatusCode::TOO_MANY_REQUESTS => capped += 1,
+            s => panic!("unexpected status under concurrency: {s}"),
+        }
+    }
+    assert_eq!(created, 3, "daily cap must hold exactly");
+    assert_eq!(capped, 7);
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email='racer@x.com'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 1, "one identity despite the insert race");
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;

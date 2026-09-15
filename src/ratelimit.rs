@@ -34,6 +34,8 @@ impl RateLimiter {
         if map.len() >= MAX_TRACKED_IPS {
             map.retain(|_, hits| hits.iter().any(|t| now.duration_since(*t) < self.window));
             if map.len() >= MAX_TRACKED_IPS {
+                // Fail-open: drop all buckets (legit ones reset) rather than
+                // blocking everyone or growing without bound.
                 map.clear();
             }
         }

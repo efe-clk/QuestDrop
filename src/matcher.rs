@@ -71,7 +71,7 @@ impl Matcher for RuleMatcher {
                 }
             })
             .collect();
-        scored.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
+        scored.sort_by(|x, y| y.score.total_cmp(&x.score));
         let top3: Vec<RankedItem> = scored.iter().take(3).cloned().collect();
         let rest = &scored[top3.len().min(scored.len())..];
         let surprise: Vec<RankedItem> = rest.choose(&mut rng).cloned().into_iter().collect();

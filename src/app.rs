@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::IpAddr, net::SocketAddr, sync::Arc, time::Duration};
 
 use askama::Template;
 use axum::{
@@ -96,6 +96,13 @@ fn db_error(e: DbError) -> Response {
             tracing::error!(error = %inner, "database failure");
             problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response()
         }
+        // Only reachable if a code path forgets to consume it (create_drop
+        // always retries internally); fail safe as a transient error.
+        DbError::RetryTx => problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "concurrent write, please retry",
+        )
+        .into_response(),
     }
 }
 
@@ -278,16 +285,32 @@ async fn ready(State(s): State<AppState>) -> Response {
     }
 }
 
-/// 10 drops/min per IP on the write endpoint (spam-flood guard until auth).
+/// Client IP for rate limiting. Behind Fly's proxy ConnectInfo is the edge
+/// IP shared by everyone, so the leftmost X-Forwarded-For entry wins.
+/// Trust assumption: a single honest proxy (Fly) sets the header; a client
+/// spoofing it only spends from a bucket nobody else uses.
+fn client_ip(req: &Request<axum::body::Body>, conn: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
+    if let Some(v) = req.headers().get("x-forwarded-for") {
+        if let Ok(s) = v.to_str() {
+            if let Some(first) = s.split(',').next() {
+                if let Ok(ip) = first.trim().parse() {
+                    return ip;
+                }
+            }
+        }
+    }
+    conn.map(|c| c.0.ip())
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap())
+}
+
+/// 10 writes/min per IP on the write endpoints (spam-flood guard until auth).
 async fn posts_limit(
     State(lim): State<Arc<RateLimiter>>,
     conn: Option<ConnectInfo<SocketAddr>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let ip = conn
-        .map(|c| c.0.ip())
-        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+    let ip = client_ip(&req, conn);
     if let Some(retry) = lim.check(ip) {
         let (status, body) = problem(
             StatusCode::TOO_MANY_REQUESTS,
@@ -319,13 +342,15 @@ fn security_headers(router: Router<AppState>) -> Router<AppState> {
 }
 
 pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
-    let limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    // Separate budgets: spamming profiles must not eat the drop quota.
+    let drop_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let profile_limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let voice_dir = std::path::PathBuf::from(
         std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
     );
     let state = AppState {
         pool,
-        limiter: limiter.clone(),
+        limiter: drop_limiter.clone(),
         voice_dir: voice_dir.clone(),
     };
     let router = Router::new()
@@ -336,15 +361,33 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         .route(
             "/v1/projects",
             post(create_project)
-                .route_layer(middleware::from_fn_with_state(limiter.clone(), posts_limit)),
+                .route_layer(middleware::from_fn_with_state(drop_limiter, posts_limit)),
         )
         .route(
             "/v1/users/upsert",
-            post(upsert_profile).route_layer(middleware::from_fn_with_state(limiter, posts_limit)),
+            post(upsert_profile)
+                .route_layer(middleware::from_fn_with_state(profile_limiter, posts_limit)),
         )
         .route("/v1/match", get(match_pool))
-        .nest_service("/voice", ServeDir::new(&voice_dir));
+        .nest_service("/voice", ServeDir::new(&voice_dir))
+        .fallback(fallback_404);
     security_headers(router).with_state(state)
+}
+
+/// Unmatched paths: trim one trailing slash via 308 (idempotent, so no
+/// loops), otherwise return a shaped JSON 404 instead of Axum's default text.
+async fn fallback_404(uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    if path.len() > 1 && path.ends_with('/') {
+        let q = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+        let to = format!("{}{}", path.trim_end_matches('/'), q);
+        if let Ok(loc) = HeaderValue::from_str(&to) {
+            let mut res = (StatusCode::PERMANENT_REDIRECT, "").into_response();
+            res.headers_mut().insert(header::LOCATION, loc);
+            return res;
+        }
+    }
+    problem(StatusCode::NOT_FOUND, "not found").into_response()
 }
 
 /// Defense in depth next to validation: refuse /voice/ URLs whose file is
