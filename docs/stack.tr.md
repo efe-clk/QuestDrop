@@ -22,3 +22,11 @@ Tarih: 2026-09-15
 ## Kapsam Dışı
 
 - MVP'de mikroservis yok, GraphQL yok, S3 kurulumu yok.
+
+## Tedarik zinciri (10. tur denetim)
+
+- Tam lockfile OSV taraması: 1 bulgu, `rsa 0.9.10` (RUSTSEC-2023-0071, Marvin zamanlama saldırısı).
+- Hüküm: ERİŞİLEMEZ. Sadece `sqlx-macros-core` (host/build-time) üzerinden gelir;
+  üretim hedef grafında yok (`cargo tree`: 0 eşleşme), binary'de `rsa` sembolü yok.
+- `sqlx` tarafında `default-features = false`, MySQL/SQLite sürücüleri gemide değil.
+- Her bağımlılık değişiminde yeniden tara.

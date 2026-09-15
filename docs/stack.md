@@ -22,3 +22,12 @@ Date: 2026-09-15
 ## Non-goals
 
 - No microservices, no GraphQL, no S3 setup in MVP.
+
+## Supply chain (audit round 10)
+
+- Full-lockfile OSV scan: 1 hit, `rsa 0.9.10` (RUSTSEC-2023-0071, Marvin timing oracle).
+- Verdict: NOT reachable. It arrives via `sqlx-macros-core` (host/build-time only);
+  the production target graph excludes it (`cargo tree`: 0 matches) and the
+  binary contains no `rsa`-crate symbols (only `ring`/`rustls` verification).
+- `sqlx` uses `default-features = false` so no MySQL/SQLite drivers ship.
+- Re-scan on every dependency change.
