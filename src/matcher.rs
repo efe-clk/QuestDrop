@@ -6,7 +6,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PoolItem {
     pub id: String,
     pub skill_needed: Vec<String>,
@@ -14,7 +14,7 @@ pub struct PoolItem {
     pub energy: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct QuestUser {
     pub id: String,
     pub can_do: Vec<String>,

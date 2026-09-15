@@ -30,7 +30,7 @@ impl RateLimiter {
     /// Returns `Some(retry_after_secs)` when the caller is over the limit.
     pub fn check(&self, ip: IpAddr) -> Option<u64> {
         let now = Instant::now();
-        let mut map = self.inner.lock().unwrap();
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= MAX_TRACKED_IPS {
             map.retain(|_, hits| hits.iter().any(|t| now.duration_since(*t) < self.window));
             if map.len() >= MAX_TRACKED_IPS {

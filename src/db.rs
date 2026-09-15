@@ -44,44 +44,48 @@ async fn find_or_create_user(
     handle: &str,
     email: &str,
 ) -> Result<Uuid, DbError> {
-    if let Some(row) = sqlx::query("SELECT id, handle FROM users WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&mut **tx)
-        .await?
-    {
-        let id: Uuid = row.try_get("id")?;
-        let existing: String = row.try_get("handle")?;
-        if existing != handle {
-            return Err(DbError::Conflict(format!(
-                "email is already registered with a different handle"
-            )));
+    // Up to two attempts: a concurrent first-drop can win the INSERT race
+    // between our SELECTs, in which case we simply re-read the winner.
+    for _ in 0..2 {
+        if let Some(row) = sqlx::query("SELECT id, handle FROM users WHERE email = $1")
+            .bind(email)
+            .fetch_optional(&mut **tx)
+            .await?
+        {
+            let id: Uuid = row.try_get("id")?;
+            let existing: String = row.try_get("handle")?;
+            if existing != handle {
+                return Err(DbError::Conflict(
+                    "email is already registered with a different handle".into(),
+                ));
+            }
+            return Ok(id);
         }
-        return Ok(id);
-    }
-    if sqlx::query("SELECT 1 FROM users WHERE handle = $1")
+        if sqlx::query("SELECT 1 FROM users WHERE handle = $1")
+            .bind(handle)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some()
+        {
+            return Err(DbError::Conflict("handle is already taken".into()));
+        }
+        match sqlx::query_scalar(
+            "INSERT INTO users (handle, email) VALUES ($1, $2) RETURNING id",
+        )
         .bind(handle)
-        .fetch_optional(&mut **tx)
-        .await?
-        .is_some()
-    {
-        return Err(DbError::Conflict(format!("handle is already taken")));
-    }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (handle, email) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(handle)
-    .bind(email)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| match &e {
-        // Two concurrent first-drops can both pass the SELECT checks above;
-        // the UNIQUE constraint arbitrates — report 409, not 503.
-        sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => {
-            DbError::Conflict("handle or email is already taken".into())
+        .bind(email)
+        .fetch_one(&mut **tx)
+        .await
+        {
+            Ok(id) => return Ok(id),
+            // Lost the race above; loop once more and read the winner.
+            Err(sqlx::Error::Database(d)) if d.code().as_deref() == Some("23505") => continue,
+            Err(e) => return Err(DbError::Db(e)),
         }
-        _ => DbError::Db(e),
-    })?;
-    Ok(id)
+    }
+    Err(DbError::Conflict(
+        "concurrent registration, please retry".into(),
+    ))
 }
 
 /// Creates project + open offer + outbox event atomically.
@@ -186,5 +190,35 @@ pub async fn count_open(pool: &PgPool) -> Result<i64, DbError> {
         "SELECT COUNT(*) FROM projects WHERE status = 'OPEN'::project_status",
     )
     .fetch_one(pool)
+    .await?)
+}
+
+/// Skills profile for matching. None = unknown user (caller maps to 404).
+pub async fn load_user(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<crate::matcher::QuestUser>, DbError> {
+    Ok(sqlx::query_as::<_, crate::matcher::QuestUser>(
+        "SELECT id::text AS id, can_do, looking_for FROM users WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// OPEN pool minus the requester's own projects, newest first (cap 100).
+pub async fn match_candidates(
+    pool: &PgPool,
+    giver: Uuid,
+) -> Result<Vec<crate::matcher::PoolItem>, DbError> {
+    Ok(sqlx::query_as::<_, crate::matcher::PoolItem>(
+        "SELECT p.id::text AS id, p.skill_needed,
+                p.time_bucket::text AS time_bucket, p.energy::text AS energy
+         FROM projects p
+         WHERE p.status = 'OPEN'::project_status AND p.giver_id != $1
+         ORDER BY p.created_at DESC LIMIT 100",
+    )
+    .bind(giver)
+    .fetch_all(pool)
     .await?)
 }

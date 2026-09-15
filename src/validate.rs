@@ -86,7 +86,7 @@ pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
     if !valid_handle(&handle) {
         errs.push("handle must be 3-24 chars: lowercase letters, digits, underscore".into());
     }
-    let email = r.email.trim().to_string();
+    let email = r.email.trim().to_lowercase();
     if !valid_email(&email) {
         errs.push("email is invalid".into());
     }
@@ -168,6 +168,16 @@ mod tests {
         assert_eq!(v.time_bucket, "S");
         assert_eq!(v.energy, "LOW");
         assert_eq!(v.skill_needed, vec!["rust"]);
+    }
+
+    #[test]
+    fn email_is_lowercased() {
+        // Same mailbox in different cases must map to one identity,
+        // otherwise the daily cap can be bypassed with case variants.
+        let mut mixed = good();
+        mixed.email = "User@X.COM".into();
+        let v = validate_drop(&mixed).expect("must pass");
+        assert_eq!(v.email, "user@x.com");
     }
 
     #[test]

@@ -46,8 +46,9 @@ Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
 ## Hızlı Başlangıç (5 dk)
 
 ```bash
-cp .env.example .env
-cargo run
+cp .env.example .env   # DATABASE_URL'e erişilebilir bir Postgres yaz
+cargo run              # migration'lar açılışta otomatik koşar
 ```
 
-`http://localhost:3000` aç, health `/health` adresinde.
+`http://localhost:3000` aç, health `/health` adresinde (`db` durumuyla).
+Veritabanı yoksa sunucu degrade çalışır: havuz boş, yazmalar 503 döner.

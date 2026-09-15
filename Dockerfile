@@ -12,7 +12,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
   && useradd -r -u 10001 appuser
 COPY --from=build /app/target/release/questdrop ./questdrop
-COPY templates ./templates
+# NOTE: templates/ is compiled into the binary by Askama at build time.
 RUN mkdir -p ./data/voice && chown -R appuser:appuser /app
 USER appuser
 ENV PORT=3000 VOICE_DIR=./data/voice

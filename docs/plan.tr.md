@@ -2,7 +2,7 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum: Faz 0 bitti, Faz 1 bitti (2026-09-15, 12 test yeşil + canlı E2E).
+Durum: Faz 0 bitti, Faz 1 bitti, Faz 2 eşleşme endpoint'i bitti (canlı havuzda RuleMatcher).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 

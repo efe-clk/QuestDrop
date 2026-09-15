@@ -15,11 +15,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
+use tower_http::{
+    services::ServeDir, set_header::SetResponseHeaderLayer, timeout::TimeoutLayer,
+};
 use tracing::warn;
 
 use crate::{
     db::{self, DbError},
+    matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
     validate::{RawDrop, validate_drop},
 };
@@ -28,6 +31,7 @@ use crate::{
 pub struct AppState {
     pub pool: Option<sqlx::PgPool>,
     pub limiter: Arc<RateLimiter>,
+    pub voice_dir: std::path::PathBuf,
 }
 
 #[derive(Template)]
@@ -148,14 +152,36 @@ async fn list_projects(State(s): State<AppState>, Query(q): Query<PoolQuery>) ->
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct MatchQuery {
-    user_id: Option<String>,
+    user_id: Option<uuid::Uuid>,
 }
 
-async fn match_pool(Query(_q): Query<MatchQuery>) -> Response {
-    // Phase 2 wires RuleMatcher to the real pool. Contract already fixed.
-    Json(serde_json::json!({ "matches": [] })).into_response()
+async fn match_pool(
+    State(s): State<AppState>,
+    q: Result<Query<MatchQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(e) => return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response(),
+    };
+    let Some(uid) = q.user_id else {
+        return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
+    };
+    let user = match db::load_user(pool, uid).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return problem(StatusCode::NOT_FOUND, "unknown user").into_response(),
+        Err(e) => return db_error(e),
+    };
+    match db::match_candidates(pool, uid).await {
+        Ok(pool_items) => {
+            Json(serde_json::json!({ "matches": RuleMatcher.match_items(&user, &pool_items) }))
+                .into_response()
+        }
+        Err(e) => db_error(e),
+    }
 }
 
 async fn create_project(
@@ -178,6 +204,17 @@ async fn create_project(
             return problem_errors(StatusCode::BAD_REQUEST, "invalid drop", errs).into_response();
         }
     };
+    // A /voice/ URL must point at a file that actually exists; otherwise the
+    // pool fills with dead voice links. Remote URLs are the giver's claim.
+    if valid.voice_url.starts_with("/voice/")
+        && !voice_file_exists(&s.voice_dir, &valid.voice_url)
+    {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "voice file not found under /voice/",
+        )
+        .into_response();
+    }
     match db::create_drop(pool, &valid).await {
         Ok((project_id, offer_id)) => (
             StatusCode::CREATED,
@@ -215,6 +252,7 @@ async fn posts_limit(
 
 fn security_headers(router: Router<AppState>) -> Router<AppState> {
     router
+        .layer(TimeoutLayer::new(Duration::from_secs(10)))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -231,9 +269,13 @@ fn security_headers(router: Router<AppState>) -> Router<AppState> {
 
 pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
     let limiter = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let voice_dir = std::path::PathBuf::from(
+        std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
+    );
     let state = AppState {
         pool,
         limiter: limiter.clone(),
+        voice_dir: voice_dir.clone(),
     };
     let router = Router::new()
         .route("/", get(index))
@@ -247,13 +289,18 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
             )),
         )
         .route("/v1/match", get(match_pool))
-        .nest_service(
-            "/voice",
-            ServeDir::new(
-                std::env::var("VOICE_DIR").unwrap_or_else(|_| "./data/voice".into()),
-            ),
-        );
+        .nest_service("/voice", ServeDir::new(&voice_dir));
     security_headers(router).with_state(state)
+}
+
+/// Defense in depth next to validation: refuse /voice/ URLs whose file is
+/// absent (or escapes the dir) so the pool never lists dead voice links.
+fn voice_file_exists(dir: &std::path::Path, url: &str) -> bool {
+    let rel = url.strip_prefix("/voice/").unwrap_or("");
+    if rel.is_empty() || rel.contains("..") {
+        return false;
+    }
+    dir.join(rel).is_file()
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -323,10 +370,15 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = term.recv() => {},
-            _ = tokio::signal::ctrl_c() => {},
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => tokio::select! {
+                _ = term.recv() => {},
+                _ = tokio::signal::ctrl_c() => {},
+            },
+            // Signal handling unavailable: still shut down cleanly on Ctrl-C.
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
     }
     #[cfg(not(unix))]

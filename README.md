@@ -46,8 +46,9 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 ## Quickstart (5 min)
 
 ```bash
-cp .env.example .env
-cargo run
+cp .env.example .env   # set DATABASE_URL to a reachable Postgres
+cargo run              # migrations run automatically on boot
 ```
 
-Open `http://localhost:3000`, health at `/health`.
+Open `http://localhost:3000`, health at `/health` (includes `db` status).
+Without a database the server runs degraded: pool is empty, writes return 503.

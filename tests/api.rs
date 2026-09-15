@@ -14,7 +14,10 @@ use tower::ServiceExt;
 
 static DB_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 fn lock() -> std::sync::MutexGuard<'static, ()> {
-    DB_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    DB_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 async fn test_pool() -> PgPool {
@@ -43,6 +46,9 @@ async fn clean(pool: &PgPool) {
         .execute(pool)
         .await
         .unwrap();
+    // Fixture for /voice/* existence checks (gitignored runtime dir).
+    std::fs::create_dir_all("./data/voice").unwrap();
+    std::fs::write("./data/voice/demo.mp3", b"fake-mp3-fixture").unwrap();
 }
 
 fn drop_json(handle: &str, email: &str, title: &str) -> serde_json::Value {
@@ -209,6 +215,61 @@ async fn malformed_json_is_rfc9457() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["status"], 400);
     assert!(json.get("title").is_some());
+}
+
+#[tokio::test]
+async fn match_returns_ranked_excluding_own() {
+    let _g = lock();
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    let (s, _) = post_drop(&app, drop_json("matcher_a", "matcha@x.com", "Rust CLI")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _) = post_drop(&app, drop_json("matcher_a", "matcha@x.com", "Rust bot")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _) = post_drop(&app, drop_json("matcher_b", "matchb@x.com", "Go tool")).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let uid: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='matcher_b'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/match?user_id={uid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let items = json["matches"].as_array().unwrap();
+    // Only A's two projects (own excluded), scores in range.
+    assert_eq!(items.len(), 2);
+    for m in items {
+        let s = m["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&s));
+    }
+
+    // Unknown user -> 404, garbage uuid -> 400, missing param -> 400.
+    for uri in [
+        "/v1/match?user_id=00000000-0000-0000-0000-000000000000".to_string(),
+        "/v1/match?user_id=nope".to_string(),
+        "/v1/match".to_string(),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(res.status().is_client_error(), "{uri}");
+    }
 }
 
 #[tokio::test]

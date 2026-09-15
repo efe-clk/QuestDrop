@@ -1,6 +1,5 @@
 /target
 .env
 data/voice/*
-!data/voice/.gitkeep
 .DS_Store
 *.log
