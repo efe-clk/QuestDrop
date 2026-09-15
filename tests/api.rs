@@ -1018,6 +1018,39 @@ async fn publisher_keeps_failed_events() {
 }
 
 #[tokio::test]
+async fn match_embedding_algo_is_deterministic() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (s, _) = post_drop(&app, drop_json("emb_a", "emba@x.com", "Rust quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let uid: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='emb_a'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let res = app
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            (res.status(), {
+                let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            })
+        }
+    };
+    // Own project excluded -> empty; bad algo -> 400.
+    let (s, _) = get(format!("/v1/match?user_id={uid}&algo=embedding")).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = get(format!("/v1/match?user_id={uid}&algo=nope")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;

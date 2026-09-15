@@ -21,7 +21,7 @@ pub struct QuestUser {
     pub looking_for: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankedItem {
     pub id: String,
     pub skill_needed: Vec<String>,
@@ -86,9 +86,95 @@ impl Matcher for RuleMatcher {
     }
 }
 
-// Placeholder for phase C: same trait, pgvector-backed.
-// pub struct EmbeddingMatcher;
-// impl Matcher for EmbeddingMatcher { ... }
+/// C phase: deterministic local text embedding behind the same trait.
+/// No external model or API key needed: char-trigram hashing into a fixed
+/// vector + cosine similarity. Fully deterministic (no random term), so the
+/// same pool always ranks the same. A future pgvector-backed matcher swaps
+/// in without touching callers.
+pub struct EmbeddingMatcher {
+    dim: usize,
+}
+
+impl Default for EmbeddingMatcher {
+    fn default() -> Self {
+        Self { dim: 256 }
+    }
+}
+
+impl EmbeddingMatcher {
+    pub fn new(dim: usize) -> Self {
+        Self { dim: dim.max(16) }
+    }
+
+    fn user_text(user: &QuestUser) -> String {
+        format!("{} {}", user.can_do.join(" "), user.looking_for.join(" ")).to_lowercase()
+    }
+
+    fn item_text(item: &PoolItem) -> String {
+        item.skill_needed.join(" ").to_lowercase()
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        let mut v = vec![0f32; self.dim];
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return v;
+        }
+        // Trigrams with padding so short texts still fill buckets.
+        let mut grams: Vec<String> = Vec::new();
+        if chars.len() < 3 {
+            grams.push(chars.iter().collect());
+        } else {
+            for w in chars.windows(3) {
+                grams.push(w.iter().collect());
+            }
+        }
+        for g in grams {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in g.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            v[(h as usize) % self.dim] += 1.0;
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    fn cosine(a: &[f32], b: &[f32]) -> f64 {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        ((dot * 100.0).round() / 100.0) as f64
+    }
+}
+
+impl Matcher for EmbeddingMatcher {
+    fn match_items(&self, user: &QuestUser, pool: &[PoolItem]) -> Vec<RankedItem> {
+        let uvec = self.embed(&Self::user_text(user));
+        let mut scored: Vec<RankedItem> = pool
+            .iter()
+            .filter(|p| p.id != user.id)
+            .map(|p| {
+                let cos = Self::cosine(&uvec, &self.embed(&Self::item_text(p)));
+                RankedItem {
+                    id: p.id.clone(),
+                    skill_needed: p.skill_needed.clone(),
+                    time_bucket: p.time_bucket.clone(),
+                    energy: p.energy.clone(),
+                    score: cos,
+                    reason: format!("cos={cos:.2}"),
+                }
+            })
+            .collect();
+        scored.sort_by(|x, y| y.score.total_cmp(&x.score));
+        scored.truncate(4);
+        scored
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -148,5 +234,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn embedding_ranks_skill_overlap_first_deterministically() {
+        use super::{EmbeddingMatcher, Matcher};
+        let m = EmbeddingMatcher::default();
+        let user = QuestUser {
+            id: "u1".into(),
+            can_do: vec!["rust".into(), "axum".into()],
+            looking_for: vec![],
+        };
+        let pool = vec![
+            item("p1", &["python", "django"]),
+            item("p2", &["rust", "axum"]),
+            item("p3", &["go", "gin"]),
+        ];
+        let a = m.match_items(&user, &pool);
+        let b = m.match_items(&user, &pool);
+        assert_eq!(a[0].id, "p2", "skill overlap must rank first");
+        assert_eq!(a, b, "embedding matcher must be deterministic");
+        assert!(a.iter().all(|r| (0.0..=1.0).contains(&r.score)));
     }
 }

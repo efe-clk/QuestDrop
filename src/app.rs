@@ -163,6 +163,7 @@ async fn list_projects(
 #[derive(Deserialize)]
 struct MatchQuery {
     user_id: Option<uuid::Uuid>,
+    algo: Option<String>,
 }
 
 async fn match_pool(
@@ -188,8 +189,20 @@ async fn match_pool(
     };
     match db::match_candidates(pool, uid).await {
         Ok(pool_items) => {
-            Json(serde_json::json!({ "matches": RuleMatcher.match_items(&user, &pool_items) }))
-                .into_response()
+            let matches = match q.algo.as_deref().unwrap_or("rule") {
+                "embedding" => {
+                    crate::matcher::EmbeddingMatcher::default().match_items(&user, &pool_items)
+                }
+                "rule" => RuleMatcher.match_items(&user, &pool_items),
+                other => {
+                    return problem(
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown algo '{other}': use rule or embedding"),
+                    )
+                    .into_response();
+                }
+            };
+            Json(serde_json::json!({ "matches": matches })).into_response()
         }
         Err(e) => db_error(e),
     }
