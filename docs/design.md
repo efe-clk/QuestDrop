@@ -29,7 +29,7 @@ Single repo, API-first modular monolith. No microservices.
 - Core knows nothing about the outside world. Web and bot use the same REST API.
 - Matching is one trait: `trait Matcher { fn match(user, pool) -> ranked_list }`. Rule-based now, `EmbeddingMatcher` impl later.
 - Event: simple DB outbox table for `swap.created` (sqlx, polled publisher). Bot notifications and AI re-ranking listen to it.
-- Auth: magic link. Files: link (no S3). Voice: 30s mp3.
+- Auth: magic link (PLANNED, not implemented). Files: link (no S3). Voice: 30s mp3 (presence + format enforced; duration check at upload phase).
 
 ## 4. Components + Data Model
 
@@ -52,7 +52,7 @@ Out: comments, likes, DMs, scores, category tree. Moderation only: reports (proj
 
 - No voice/link = no save, explain why. No self-matching.
 - Adapter crash keeps core alive. AI matcher failure falls back to rule-based.
-- Max 3 drops per day. 3 reports = auto-hide + review queue. No delete, only close.
+- Max 3 drops per day. 3 reports = auto-hide + review queue (reports table is the queue; review UI pending). No delete, only close.
 
 ## 7. Tests
 

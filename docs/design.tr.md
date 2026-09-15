@@ -29,7 +29,7 @@ Tek repo, API-first modüler monolit. Mikroservis yok.
 - Core dış dünyayı bilmez. Web de bot da aynı REST'i kullanır.
 - Eşleşme tek trait: `trait Matcher { fn match(user, pool) -> ranked_list }`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` impl.
 - Event: `swap.created` için basit DB outbox tablosu (sqlx, poll eden publisher). Bot bildirimi ve AI yeniden-sıralama bunu dinler.
-- Auth: magic link. Dosya: link (S3 yok). Ses: 30sn mp3.
+- Auth: magic link (PLANLANDI, henüz yok). Dosya: link (S3 yok). Ses: 30sn mp3 (varlık + format denetlenir; süre kontrolü upload fazında).
 
 ## 4. Bileşenler + Veri Modeli
 
@@ -52,7 +52,7 @@ Yok: yorum, like, DM, puan, kategori ağacı. Moderasyon için sadece reports (p
 
 - Ses/link yoksa kaydetme, nedenini söyle. Kendinle eşleşme yasak.
 - Adaptör çökerse core ayakta. AI matcher hata verirse kural-tabanlıya düş.
-- Günde max 3 bırakma. 3 report = oto-gizle + inceleme kuyruğu. Silme yok, kapatma var.
+- Günde max 3 bırakma. 3 report = oto-gizle + inceleme kuyruğu (kuyruk = reports tablosu; inceleme arayüzü sonraya). Silme yok, kapatma var.
 
 ## 7. Test
 

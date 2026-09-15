@@ -65,22 +65,23 @@ fn valid_http_url(u: &str, max_len: usize) -> bool {
 }
 
 /// Voice must be an mp3: either a /voice/ relative path (local MVP storage)
-/// or an http(s) URL ending in .mp3. Duration (10-60s) is checked at upload
+/// or an http(s) URL whose PATH ends in .mp3 (query strings ignored, so
+/// future signed URLs keep working). Duration (10-60s) is checked at upload
 /// time in a later phase; the format gate lives here.
 fn valid_voice(v: &str) -> bool {
     if v.len() > 2048 || v.is_empty() {
         return false;
     }
-    let lower = v.to_lowercase();
-    if !lower.ends_with(".mp3") {
-        return false;
-    }
-    // Exact prefix: ServeDir is case-sensitive on Linux, so /VOICE/x.mp3
-    // would validate but 404. Absolute URLs go through scheme checks.
     if v.starts_with("/voice/") && !v.contains("..") {
-        return true;
+        return v.to_lowercase().ends_with(".mp3");
     }
-    valid_http_url(v, 2048)
+    match url::Url::parse(v) {
+        Ok(p) => {
+            (p.scheme() == "http" || p.scheme() == "https")
+                && p.path().to_lowercase().ends_with(".mp3")
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
@@ -314,6 +315,20 @@ mod tests {
             validate_drop(&bad).is_err(),
             "case-variant prefix 404s on Linux"
         );
+    }
+
+    #[test]
+    fn voice_accepts_signed_urls_rejects_query_tricks() {
+        let mut ok = good();
+        // Future S3-style signed URL: suffix lives in the path, not the query.
+        ok.voice_url = "https://cdn.x.com/a.mp3?sig=abc123&exp=99".into();
+        assert!(validate_drop(&ok).is_ok());
+        // .mp3 only in the query string is not an mp3 path.
+        ok.voice_url = "https://x.com/y?f=.mp3".into();
+        assert!(validate_drop(&ok).is_err());
+        // Uppercase extension on remote URLs is fine.
+        ok.voice_url = "https://x.com/a.MP3".into();
+        assert!(validate_drop(&ok).is_ok());
     }
 
     #[test]
