@@ -41,8 +41,7 @@ fn overlap(a: &[String], b: &[String]) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let set_b: std::collections::HashSet<String> =
-        b.iter().map(|s| s.to_lowercase()).collect();
+    let set_b: std::collections::HashSet<String> = b.iter().map(|s| s.to_lowercase()).collect();
     let hits = a
         .iter()
         .filter(|s| set_b.contains(&s.to_lowercase()))
@@ -57,8 +56,9 @@ impl Matcher for RuleMatcher {
             .iter()
             .filter(|p| p.id != user.id)
             .map(|p| {
-                let fit =
-                    (overlap(&user.can_do, &p.skill_needed) + overlap(&user.looking_for, &p.skill_needed)) / 2.0;
+                let fit = (overlap(&user.can_do, &p.skill_needed)
+                    + overlap(&user.looking_for, &p.skill_needed))
+                    / 2.0;
                 let rand_v: f64 = rng.gen();
                 let score = ((fit * 0.8 + rand_v * 0.2) * 100.0).round() / 100.0;
                 RankedItem {
@@ -134,7 +134,11 @@ mod tests {
         let pool = vec![item("p1", &["rust"]), item("p2", &["go"])];
         for _ in 0..200 {
             for r in m.match_items(&user, &pool) {
-                assert!((0.0..=1.0).contains(&r.score), "score out of range: {}", r.score);
+                assert!(
+                    (0.0..=1.0).contains(&r.score),
+                    "score out of range: {}",
+                    r.score
+                );
             }
         }
     }

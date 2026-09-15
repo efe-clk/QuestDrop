@@ -4,20 +4,20 @@
 //! Tests share one database and run serially (DB_LOCK) with truncate between them.
 
 use axum::{
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
 use questdrop::build_app;
 use sqlx::PgPool;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use tower::ServiceExt;
 
-static DB_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-fn lock() -> std::sync::MutexGuard<'static, ()> {
+static DB_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+async fn lock() -> tokio::sync::MutexGuard<'static, ()> {
     DB_LOCK
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .await
 }
 
 async fn test_pool() -> PgPool {
@@ -65,10 +65,7 @@ fn drop_json(handle: &str, email: &str, title: &str) -> serde_json::Value {
     })
 }
 
-async fn post_drop(
-    app: &axum::Router,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
+async fn post_drop(app: &axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
     let res = app
         .clone()
         .oneshot(
@@ -89,12 +86,13 @@ async fn post_drop(
 
 #[tokio::test]
 async fn drop_201_freezes_offer_and_outbox() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (status, json) = post_drop(&app, drop_json("alice_1", "alice1@x.com", "Photo renamer")).await;
+    let (status, json) =
+        post_drop(&app, drop_json("alice_1", "alice1@x.com", "Photo renamer")).await;
     assert_eq!(status, StatusCode::CREATED, "body: {json}");
     assert!(json.get("project_id").is_some());
     assert!(json.get("offer_id").is_some());
@@ -111,7 +109,12 @@ async fn drop_201_freezes_offer_and_outbox() {
     // Pool lists it.
     let res = app
         .clone()
-        .oneshot(Request::builder().uri("/v1/projects").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/projects")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
@@ -122,7 +125,7 @@ async fn drop_201_freezes_offer_and_outbox() {
 
 #[tokio::test]
 async fn invalid_drop_400_with_errors() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
@@ -138,13 +141,17 @@ async fn invalid_drop_400_with_errors() {
 
 #[tokio::test]
 async fn fourth_drop_per_day_429() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     // Fresh app per request would reset the IP limiter; one app for all 4 posts.
     let app = build_app(Some(pool));
     for i in 1..=3 {
-        let (s, _) = post_drop(&app, drop_json("bob_4", "bob4@x.com", &format!("Project {i}"))).await;
+        let (s, _) = post_drop(
+            &app,
+            drop_json("bob_4", "bob4@x.com", &format!("Project {i}")),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
     }
     let (s, _) = post_drop(&app, drop_json("bob_4", "bob4@x.com", "Project 4")).await;
@@ -153,7 +160,7 @@ async fn fourth_drop_per_day_429() {
 
 #[tokio::test]
 async fn email_handle_mismatch_409() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
@@ -166,12 +173,16 @@ async fn email_handle_mismatch_409() {
 
 #[tokio::test]
 async fn pool_paginates_with_cursor() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
     for i in 1..=3 {
-        let (s, _) = post_drop(&app, drop_json("dave_6", "dave6@x.com", &format!("Item {i}"))).await;
+        let (s, _) = post_drop(
+            &app,
+            drop_json("dave_6", "dave6@x.com", &format!("Item {i}")),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED);
     }
     let get = |uri: String| {
@@ -187,7 +198,10 @@ async fn pool_paginates_with_cursor() {
     };
     let p1 = get("/v1/projects?limit=2".into()).await;
     assert_eq!(p1["pool"].as_array().unwrap().len(), 2);
-    let cursor = p1["next_cursor"].as_str().expect("must have cursor").to_string();
+    let cursor = p1["next_cursor"]
+        .as_str()
+        .expect("must have cursor")
+        .to_string();
     let p2 = get(format!("/v1/projects?limit=2&cursor={cursor}")).await;
     assert_eq!(p2["pool"].as_array().unwrap().len(), 1);
     assert!(p2.get("next_cursor").unwrap().is_null());
@@ -195,7 +209,7 @@ async fn pool_paginates_with_cursor() {
 
 #[tokio::test]
 async fn malformed_json_is_rfc9457() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool));
@@ -219,7 +233,7 @@ async fn malformed_json_is_rfc9457() {
 
 #[tokio::test]
 async fn match_returns_ranked_excluding_own() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
@@ -274,7 +288,7 @@ async fn match_returns_ranked_excluding_own() {
 
 #[tokio::test]
 async fn profile_upsert_drives_match_fit() {
-    let _g = lock();
+    let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));

@@ -1,30 +1,24 @@
-use std::{
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use askama::Template;
 use axum::{
-    Json, Router,
     extract::{ConnectInfo, Query, State},
-    http::{HeaderValue, Request, StatusCode, header},
+    http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use tower_http::{
-    services::ServeDir, set_header::SetResponseHeaderLayer, timeout::TimeoutLayer,
-};
+use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer, timeout::TimeoutLayer};
 use tracing::warn;
 
 use crate::{
     db::{self, DbError},
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
-    validate::{RawDrop, RawProfile, validate_drop, validate_profile},
+    validate::{validate_drop, validate_profile, RawDrop, RawProfile},
 };
 
 #[derive(Clone)]
@@ -145,7 +139,9 @@ async fn list_projects(
     };
     let q = match q {
         Ok(Query(q)) => q,
-        Err(e) => return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response(),
+        Err(e) => {
+            return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
+        }
     };
     let limit = q.limit.unwrap_or(20).clamp(1, 50);
     match db::list_pool(pool, q.cursor, limit).await {
@@ -172,7 +168,9 @@ async fn match_pool(
     };
     let q = match q {
         Ok(Query(q)) => q,
-        Err(e) => return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response(),
+        Err(e) => {
+            return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
+        }
     };
     let Some(uid) = q.user_id else {
         return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
@@ -213,8 +211,7 @@ async fn create_project(
     };
     // A /voice/ URL must point at a file that actually exists; otherwise the
     // pool fills with dead voice links. Remote URLs are the giver's claim.
-    if valid.voice_url.starts_with("/voice/")
-        && !voice_file_exists(&s.voice_dir, &valid.voice_url)
+    if valid.voice_url.starts_with("/voice/") && !voice_file_exists(&s.voice_dir, &valid.voice_url)
     {
         return problem(
             StatusCode::BAD_REQUEST,
@@ -248,7 +245,8 @@ async fn upsert_profile(
     let valid = match validate_profile(&raw) {
         Ok(v) => v,
         Err(errs) => {
-            return problem_errors(StatusCode::BAD_REQUEST, "invalid profile", errs).into_response();
+            return problem_errors(StatusCode::BAD_REQUEST, "invalid profile", errs)
+                .into_response();
         }
     };
     match db::upsert_profile(pool, &valid).await {
@@ -296,10 +294,8 @@ async fn posts_limit(
             "rate limit: 10 drops/min per IP",
         );
         let mut res = (status, body).into_response();
-        res.headers_mut().insert(
-            header::RETRY_AFTER,
-            HeaderValue::from(retry),
-        );
+        res.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(retry));
         return res;
     }
     next.run(req).await
@@ -339,17 +335,12 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         .route("/v1/projects", get(list_projects))
         .route(
             "/v1/projects",
-            post(create_project).route_layer(middleware::from_fn_with_state(
-                limiter.clone(),
-                posts_limit,
-            )),
+            post(create_project)
+                .route_layer(middleware::from_fn_with_state(limiter.clone(), posts_limit)),
         )
         .route(
             "/v1/users/upsert",
-            post(upsert_profile).route_layer(middleware::from_fn_with_state(
-                limiter,
-                posts_limit,
-            )),
+            post(upsert_profile).route_layer(middleware::from_fn_with_state(limiter, posts_limit)),
         )
         .route("/v1/match", get(match_pool))
         .nest_service("/voice", ServeDir::new(&voice_dir));
@@ -432,7 +423,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
+        use tokio::signal::unix::{signal, SignalKind};
         match signal(SignalKind::terminate()) {
             Ok(mut term) => tokio::select! {
                 _ = term.recv() => {},

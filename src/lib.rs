@@ -4,4 +4,4 @@ pub mod matcher;
 pub mod ratelimit;
 pub mod validate;
 
-pub use app::{AppState, build_app, run};
+pub use app::{build_app, run, AppState};

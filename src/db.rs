@@ -69,13 +69,11 @@ async fn find_or_create_user(
         {
             return Err(DbError::Conflict("handle is already taken".into()));
         }
-        match sqlx::query_scalar(
-            "INSERT INTO users (handle, email) VALUES ($1, $2) RETURNING id",
-        )
-        .bind(handle)
-        .bind(email)
-        .fetch_one(&mut **tx)
-        .await
+        match sqlx::query_scalar("INSERT INTO users (handle, email) VALUES ($1, $2) RETURNING id")
+            .bind(handle)
+            .bind(email)
+            .fetch_one(&mut **tx)
+            .await
         {
             Ok(id) => return Ok(id),
             // Lost the race above; loop once more and read the winner.
@@ -181,16 +179,20 @@ pub async fn list_pool(
     if more {
         page.pop();
     }
-    let next = if more { page.last().map(|r| r.id) } else { None };
+    let next = if more {
+        page.last().map(|r| r.id)
+    } else {
+        None
+    };
     Ok((page, next))
 }
 
 pub async fn count_open(pool: &PgPool) -> Result<i64, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM projects WHERE status = 'OPEN'::project_status",
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE status = 'OPEN'::project_status")
+            .fetch_one(pool)
+            .await?,
     )
-    .fetch_one(pool)
-    .await?)
 }
 
 /// Skills profile for matching. None = unknown user (caller maps to 404).

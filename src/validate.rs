@@ -34,7 +34,8 @@ pub struct ValidatedDrop {
 
 fn valid_handle(h: &str) -> bool {
     (3..=24).contains(&h.len())
-        && h.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && h.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 fn valid_email(e: &str) -> bool {
@@ -44,7 +45,10 @@ fn valid_email(e: &str) -> bool {
     let mut parts = e.split('@');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(local), Some(domain), None) => {
-            !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !e.contains(' ')
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !e.contains(' ')
         }
         _ => false,
     }
@@ -261,7 +265,10 @@ mod tests {
         bad.voice_url = "/voice/../../etc/passwd.mp3".into();
         assert!(validate_drop(&bad).is_err());
         bad.voice_url = "/VOICE/abc.mp3".into();
-        assert!(validate_drop(&bad).is_err(), "case-variant prefix 404s on Linux");
+        assert!(
+            validate_drop(&bad).is_err(),
+            "case-variant prefix 404s on Linux"
+        );
     }
 
     #[test]
