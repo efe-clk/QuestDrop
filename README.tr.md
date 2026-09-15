@@ -43,10 +43,11 @@ Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
 - Design (EN): [docs/design.md](./docs/design.md)
 - Plan (EN): [docs/plan.md](./docs/plan.md)
 
-## Hızlı Başlangıç
+## Hızlı Başlangıç (5 dk)
 
 ```bash
+cp .env.example .env
 cargo run
 ```
 
-> İskelet bir sonraki commit'te. Fazlar için plana bak.
+`http://localhost:3000` aç, health `/health` adresinde.

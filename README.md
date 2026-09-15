@@ -43,10 +43,11 @@ Details: [docs/stack.md](./docs/stack.md) | [Türkçesi](./docs/stack.tr.md)
 - Tasarım (TR): [docs/design.tr.md](./docs/design.tr.md)
 - Plan (TR): [docs/plan.tr.md](./docs/plan.tr.md)
 
-## Quickstart
+## Quickstart (5 min)
 
 ```bash
+cp .env.example .env
 cargo run
 ```
 
-> Scaffold landing in next commit. See plan for phases.
+Open `http://localhost:3000`, health at `/health`.

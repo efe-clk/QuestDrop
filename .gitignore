@@ -1,9 +1,6 @@
-node_modules/
-.next/
-out/
-dist/
-.env*
-!.env.example
-*.log
-*.tsbuildinfo
+/target
+.env
+data/voice/*
+!data/voice/.gitkeep
 .DS_Store
+*.log
