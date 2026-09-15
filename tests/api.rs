@@ -949,6 +949,75 @@ async fn same_key_race_executes_once() {
 }
 
 #[tokio::test]
+async fn publisher_delivers_then_idles() {
+    use questdrop::notify::{OutboxEvent, Sink};
+    struct VecSink {
+        out: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl Sink for VecSink {
+        async fn send(&self, event: &OutboxEvent) -> Result<(), String> {
+            self.out.lock().unwrap().push(event.kind.clone());
+            Ok(())
+        }
+    }
+
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (s, _) = post_drop(&app, drop_json("pub_a", "puba@x.com", "Pub quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let sink = VecSink {
+        out: std::sync::Mutex::new(Vec::new()),
+    };
+    let n = questdrop::publisher::run_once(&pool, &sink).await.unwrap();
+    assert!(n >= 1, "must deliver the swap.created event");
+    assert!(sink
+        .out
+        .lock()
+        .unwrap()
+        .contains(&"swap.created".to_string()));
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox_events WHERE NOT processed")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+    let n2 = questdrop::publisher::run_once(&pool, &sink).await.unwrap();
+    assert_eq!(n2, 0, "second poll idles");
+}
+
+#[tokio::test]
+async fn publisher_keeps_failed_events() {
+    use questdrop::notify::{OutboxEvent, Sink};
+    struct FailSink;
+    #[async_trait::async_trait]
+    impl Sink for FailSink {
+        async fn send(&self, _event: &OutboxEvent) -> Result<(), String> {
+            Err("downstream down".into())
+        }
+    }
+
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let (s, _) = post_drop(&app, drop_json("pub_b", "pubb@x.com", "Pub quest")).await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let n = questdrop::publisher::run_once(&pool, &FailSink)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox_events WHERE NOT processed")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(left >= 1, "failed events stay queued, nothing lost");
+}
+
+#[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
     let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;
