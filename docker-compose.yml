@@ -1,0 +1,80 @@
+# One-click deploy for Coolify (build pack: Docker Compose).
+#
+# Coolify reads this file and fills every ${SERVICE_*} variable itself:
+#   SERVICE_URL_QUESTDROP_3000  public URL (wildcard domain) routed to port 3000
+#   SERVICE_USER_POSTGRES / SERVICE_PASSWORD_POSTGRES  database credentials
+#   SERVICE_PASSWORD_64_SESSION  SESSION_SECRET (cookie HMAC key)
+# Nothing has to be entered by hand. Optional: SMTP_URL + MAIL_FROM for real
+# login emails (without them the link is only written to the server log),
+# BOT_SINK=webhook + BOT_WEBHOOK_URL for Discord notifications.
+#
+# Works outside Coolify too: `docker compose up` with the variables set in a
+# .env file (see .env.example).
+
+services:
+  questdrop:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVICE_URL_QUESTDROP_3000: /
+      BASE_URL: ${SERVICE_URL_QUESTDROP}
+      DATABASE_URL: postgresql://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/${POSTGRES_DB:-questdrop}
+      SESSION_SECRET: ${SERVICE_PASSWORD_64_SESSION}
+      PORT: 3000
+      VOICE_DIR: /app/data/voice
+      VOICE_QUOTA_MB: ${VOICE_QUOTA_MB:-500}
+      RUST_LOG: ${RUST_LOG:-questdrop=info,tower_http=warn}
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-questdrop@localhost}
+      LOGIN_URL: ${LOGIN_URL:-}
+    volumes:
+      - questdrop-voice:/app/data/voice
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  bot:
+    # Same image as questdrop; the second build is served from layer cache.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["./bot"]
+    environment:
+      DATABASE_URL: postgresql://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/${POSTGRES_DB:-questdrop}
+      BOT_SINK: ${BOT_SINK:-log}
+      BOT_WEBHOOK_URL: ${BOT_WEBHOOK_URL:-}
+      PUBLISHER_INTERVAL_SECS: ${PUBLISHER_INTERVAL_SECS:-5}
+      RUST_LOG: ${RUST_LOG:-questdrop=info}
+    healthcheck:
+      disable: true
+    depends_on:
+      questdrop:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SERVICE_USER_POSTGRES}
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      POSTGRES_DB: ${POSTGRES_DB:-questdrop}
+    volumes:
+      - questdrop-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  questdrop-voice:
+  questdrop-pg:
