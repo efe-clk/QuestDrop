@@ -1,0 +1,13 @@
+{
+  "name": "questdrop-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser E2E for the QuestDrop web UI (docs/web-ui.md §12)",
+  "scripts": {
+    "test": "node e2e.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
+    "playwright": "1.56.1"
+  }
+}

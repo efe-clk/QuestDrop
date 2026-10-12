@@ -3,3 +3,4 @@
 data/voice/*
 .DS_Store
 *.log
+e2e/node_modules

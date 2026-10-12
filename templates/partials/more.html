@@ -1,0 +1,1 @@
+{% if let Some(n) = next_cursor %}<a class="btn btn--secondary" href="/?cursor={{ n }}" hx-get="/?cursor={{ n }}&amp;frag=1" hx-target="#pool" hx-swap="beforeend" hx-disabled-elt="this">{{ c.t("pool.more") }}</a>{% endif %}

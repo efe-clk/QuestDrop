@@ -336,7 +336,12 @@ mod tests {
         ok.voice_url = "https://x.com/a.MP3".into();
         assert!(validate_drop(&ok).is_ok());
         // Browser-native recordings (Opus/AAC) pass, other files do not.
-        for ok_path in ["/voice/a.webm", "/voice/a.ogg", "/voice/a.m4a", "/voice/a.opus"] {
+        for ok_path in [
+            "/voice/a.webm",
+            "/voice/a.ogg",
+            "/voice/a.m4a",
+            "/voice/a.opus",
+        ] {
             ok.voice_url = ok_path.into();
             assert!(validate_drop(&ok).is_ok(), "{ok_path}");
         }

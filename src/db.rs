@@ -160,11 +160,11 @@ pub async fn list_pool(
          LIMIT $3"
     );
     let rows: Vec<PoolRow> = sqlx::query_as(&sql)
-    .bind(t)
-    .bind(i)
-    .bind(limit + 1)
-    .fetch_all(pool)
-    .await?;
+        .bind(t)
+        .bind(i)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await?;
     let more = rows.len() as i64 > limit;
     let mut page = rows;
     if more {
@@ -610,7 +610,6 @@ pub async fn all_revives(pool: &PgPool, taker: Uuid) -> Result<Vec<Revive>, DbEr
     Ok(out)
 }
 
-
 /// Session user's identity + skill profile.
 #[derive(Debug, Clone, Serialize)]
 pub struct UserInfo {
@@ -622,12 +621,10 @@ pub struct UserInfo {
 }
 
 pub async fn user_info(pool: &PgPool, id: Uuid) -> Result<Option<UserInfo>, DbError> {
-    let row = sqlx::query(
-        "SELECT id, handle, email, can_do, looking_for FROM users WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query("SELECT id, handle, email, can_do, looking_for FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     let Some(r) = row else { return Ok(None) };
     Ok(Some(UserInfo {
         id: r.try_get("id")?,
@@ -680,7 +677,10 @@ pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectDetail
 }
 
 /// Project behind an offer id (any status).
-pub async fn project_for_offer(pool: &PgPool, offer: Uuid) -> Result<Option<ProjectDetail>, DbError> {
+pub async fn project_for_offer(
+    pool: &PgPool,
+    offer: Uuid,
+) -> Result<Option<ProjectDetail>, DbError> {
     let pid: Option<Uuid> = sqlx::query_scalar("SELECT project_id FROM swap_offers WHERE id = $1")
         .bind(offer)
         .fetch_optional(pool)

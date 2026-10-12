@@ -34,7 +34,7 @@ Single repo, API-first modular monolith. No microservices.
 
 ## 4. Components + Data Model
 
-1. **users**: `id, handle (unique), email (unique), can_do[], looking_for[]`. A user is created on first drop or first login.
+1. **users**: `id, handle (unique), email (unique), can_do[], looking_for[]`. A user is created on first login.
 2. **projects** (freeze package): `title (3-80), one_liner (10-200), link_url, voice_url, skill_needed[] (max 10, each 1-32), time_bucket S|M|L, energy LOW|MID|HIGH, status OPEN|MATCHED|CLOSED, giver_id, embedding JSONB (unused placeholder)`.
    - `time_bucket` means S = under 2 h, M = 2-8 h, L = over 8 h.
 3. **swap_offers**: `project_id, giver_id, status OPEN|MATCHED|CLOSED`. Each drop creates exactly one offer. **Swaps work on offer ids, not project ids.**
@@ -47,8 +47,8 @@ Out of scope: comments, likes, DMs, scores, category tree.
 
 ### Identity rules
 
-- A drop carries `handle` + `email` in the body and needs no login. An existing email must come with its own handle, or the drop gets 409. A new pair creates the user.
-- Login: `POST /v1/auth/request` stores a token and sends `BASE_URL/login?token=…`. A client page at `/login` must POST that token to `/v1/auth/callback`, which sets the `qd_session` cookie (`HttpOnly; SameSite=Lax`, plus `Secure` when `BASE_URL` is https). **The `/login` page does not exist yet.**
+- A drop needs login; the giver is the session user. A body that names another `handle`/`email` gets 403.
+- Login: `POST /v1/auth/request` stores a token and sends `BASE_URL/login?token=…`. The `/login` page shows a button that redeems the token (never on GET, so mail-client prefetches cannot burn it) and sets the `qd_session` cookie (`HttpOnly; SameSite=Lax`, plus `Secure` when `BASE_URL` is https).
 - Swaps, reports, profile edits and voice uploads need a session, and the body ids must match the session user (else 403).
 
 ## 5. Data Flow
@@ -72,8 +72,7 @@ Out of scope: comments, likes, DMs, scores, category tree.
 ### Known limitations (2026-10-12)
 
 - Voice duration (meant to be 10-60 s) is **not** checked. Only format (magic bytes / `.mp3`) and size (5 MB) are.
-- `/v1/match` and `/v1/revive` take any `user_id` without a login, so anyone with a user id can read that user's matches and taken projects.
-- A drop needs no login, so anyone who knows a user's handle + email can drop in their name.
+- (Fixed 2026-10-12) `/v1/match` and `/v1/revive` used to take any `user_id` without login, and drops needed none either. All three now require the session user.
 - The rate limiter is in memory and per process (resets on restart, not shared across instances). It trusts the leftmost `X-Forwarded-For` value.
 - The event name `swap.created` is emitted for a **drop**, not a swap. Rename it before external consumers depend on it.
 

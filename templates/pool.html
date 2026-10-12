@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("pool.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="hero">
+  <h1 class="hero__h">{{ c.t("pool.hero") }}</h1>
+  <p class="hero__sub">{{ c.t("pool.hero_sub") }}</p>
+  <div class="actions">
+    <a class="btn btn--primary btn--lg{% if c.db_down %} is-disabled{% endif %}" href="/drop"{% if c.db_down %} aria-disabled="true"{% endif %}>
+      <svg class="ic" aria-hidden="true"><use href="#i-drop"></use></svg>{{ c.t("pool.drop_cta") }}</a>
+    <a class="btn btn--secondary btn--lg" href="/match">{{ c.t("pool.match_cta") }}</a>
+  </div>
+  {% if !c.db_down %}<p class="hero__count">{{ count_text }}</p>{% endif %}
+</section>
+
+<section class="section" aria-labelledby="pool-h">
+  <h2 id="pool-h" class="section__h">{{ c.t("pool.list_label") }}</h2>
+  {% if cards.is_empty() %}
+  <div class="empty">
+    <p class="empty__h">{{ c.t("pool.empty_title") }}</p>
+    <p>{{ c.t("pool.empty_body") }}</p>
+    {% if !paged %}<a class="btn btn--primary" href="/drop">{{ c.t("pool.drop_cta") }}</a>{% else %}<a class="btn btn--secondary" href="/">{{ c.t("common.back_to_pool") }}</a>{% endif %}
+  </div>
+  {% else %}
+  <div class="board" id="pool" aria-live="polite">
+    {% for q in cards %}{% include "partials/card.html" %}{% endfor %}
+  </div>
+  <div class="more" id="pool-more">{% include "partials/more.html" %}</div>
+  {% endif %}
+</section>
+{% endblock %}

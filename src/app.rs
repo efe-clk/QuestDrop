@@ -4,7 +4,7 @@ use axum::{
     extract::{ConnectInfo, Query, State},
     http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -16,10 +16,10 @@ use tracing::warn;
 use crate::{
     auth::{self, COOKIE_NAME},
     db::{self, DbError},
-    web,
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
     validate::{validate_drop, validate_profile, validate_report, RawDrop, RawProfile, RawReport},
+    web,
 };
 
 #[derive(Clone)]
@@ -193,7 +193,10 @@ async fn match_pool(
             let ids: Vec<uuid::Uuid> = matches.iter().filter_map(|m| m.id.parse().ok()).collect();
             let offers: std::collections::HashMap<String, Option<uuid::Uuid>> =
                 match db::projects_by_ids(pool, &ids).await {
-                    Ok(rows) => rows.into_iter().map(|r| (r.id.to_string(), r.offer_id)).collect(),
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|r| (r.id.to_string(), r.offer_id))
+                        .collect(),
                     Err(e) => return db_error(e),
                 };
             let out: Vec<serde_json::Value> = matches
@@ -362,7 +365,10 @@ async fn ready(State(s): State<AppState>) -> Response {
 /// IP shared by everyone, so the leftmost X-Forwarded-For entry wins.
 /// Trust assumption: a single honest proxy (Fly) sets the header; a client
 /// spoofing it only spends from a bucket nobody else uses.
-pub(crate) fn client_ip(req: &Request<axum::body::Body>, conn: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
+pub(crate) fn client_ip(
+    req: &Request<axum::body::Body>,
+    conn: Option<ConnectInfo<SocketAddr>>,
+) -> IpAddr {
     if let Some(v) = req.headers().get("x-forwarded-for") {
         if let Ok(s) = v.to_str() {
             if let Some(first) = s.split(',').next() {
@@ -761,9 +767,7 @@ impl VoiceError {
                 "not a supported audio file (mp3, ogg/opus, webm/opus, m4a/aac)",
             ),
             VoiceError::Full => problem(StatusCode::INSUFFICIENT_STORAGE, "voice storage full"),
-            VoiceError::Storage => {
-                problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed")
-            }
+            VoiceError::Storage => problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed"),
         }
         .into_response()
     }
@@ -921,6 +925,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         mailer: std::sync::Arc::from(auth::mailer_from_env()),
     };
     let ui_login = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_confirm = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let ui_drop = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let ui_take = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
     let ui_report = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
@@ -930,29 +935,42 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         // --- Web UI (docs/web-ui.md) ---
         .route("/", get(web::pool_page))
         .route("/lang/:code", get(web::set_lang))
+        // Limiters guard the POSTs only; page views are never throttled.
         .route(
             "/login",
-            get(web::login_page).post(web::login_post).route_layer(limit(&ui_login)),
+            get(web::login_page).merge(post(web::login_post).route_layer(limit(&ui_login))),
         )
-        .route("/login/confirm", post(web::login_confirm).route_layer(limit(&ui_login)))
+        .route(
+            "/login/confirm",
+            post(web::login_confirm).route_layer(limit(&ui_confirm)),
+        )
         .route("/logout", post(web::logout_post))
         .route(
             "/drop",
-            get(web::drop_page)
-                .post(web::drop_post)
-                .route_layer(limit(&ui_drop))
-                // Form + optional voice file (no-JS path): 5MB voice + fields.
-                .route_layer(axum::extract::DefaultBodyLimit::max(VOICE_MAX_BYTES + 64 * 1024)),
+            get(web::drop_page).merge(
+                post(web::drop_post)
+                    .route_layer(limit(&ui_drop))
+                    // Form + optional voice file (no-JS path): 5MB voice + fields.
+                    .route_layer(axum::extract::DefaultBodyLimit::max(
+                        VOICE_MAX_BYTES + 64 * 1024,
+                    )),
+            ),
         )
         .route("/match", get(web::match_page))
         .route(
             "/take/:offer_id",
-            get(web::take_page).post(web::take_post).route_layer(limit(&ui_take)),
+            get(web::take_page).merge(post(web::take_post).route_layer(limit(&ui_take))),
         )
         .route("/revive", get(web::revive_page))
-        .route("/me", get(web::me_page).post(web::me_post).route_layer(limit(&ui_me)))
+        .route(
+            "/me",
+            get(web::me_page).merge(post(web::me_post).route_layer(limit(&ui_me))),
+        )
         .route("/q/:id", get(web::quest_page))
-        .route("/report/:id", post(web::report_post).route_layer(limit(&ui_report)))
+        .route(
+            "/report/:id",
+            post(web::report_post).route_layer(limit(&ui_report)),
+        )
         .nest_service("/static", ServeDir::new(static_dir()))
         // --- API ---
         .route("/health", get(health))

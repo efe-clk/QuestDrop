@@ -6,6 +6,8 @@ Tarih: 2026-10-12 · Kapsam: [plan.tr.md](./plan.tr.md) Faz 5 · API: [openapi.y
 
 Bu doküman QuestDrop'un web arayüzünün nasıl olması gerektiğini anlatır. Arayüzü kim yazarsa yazsın bu dokümanı sözleşme olarak kullanabilir. Her ekran, bugün var olan API'ye bağlıdır. API'de eksik olan yerler §10'da ayrıca listelenmiştir.
 
+> **Durum (2026-10-12): uygulandı.** Kod: `src/web.rs`, `templates/`, `static/`, `i18n/`. §13'teki açık sorular önerildiği gibi kapatıldı: bırakma login ister (§5.2), ses için A seçeneği (§6), İngilizce + Türkçe (§9); harici ses linkleri "harici ses" etiketiyle açık kaldı. Sapmalar: kaydedicinin yüklemeden önce kaydı dinletebilmesi için CSP `media-src` `blob:`'a da izin verir; masaüstü menü 768 px yerine 960 px altında alt sekme çubuğuna geçer, çünkü arada dört etiket ve kullanıcı adı sığmıyor.
+
 ---
 
 ## 1. Kimin için, ne hissettirmeli?

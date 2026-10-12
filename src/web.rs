@@ -348,6 +348,7 @@ pub async fn ui_limit(
 // ---------------------------------------------------------------------------
 
 /// Everything `card.html` renders, precomputed so templates stay dumb.
+#[derive(Clone)]
 pub struct CardView {
     pub id: String,
     pub title: String,
@@ -474,7 +475,10 @@ pub async fn pool_page(
     let cursor = q.cursor.as_deref().and_then(|v| v.parse::<Uuid>().ok());
     let reported = reported_set(&s, c.user.as_ref()).await;
     let (rows, next, count) = match &s.pool {
-        Some(pool) => match (db::list_pool(pool, cursor, 20).await, db::count_open(pool).await) {
+        Some(pool) => match (
+            db::list_pool(pool, cursor, 20).await,
+            db::count_open(pool).await,
+        ) {
             (Ok((rows, next)), Ok(n)) => (rows, next, n),
             _ => {
                 c.db_down = true;
@@ -489,7 +493,15 @@ pub async fn pool_page(
         .collect();
     let next_cursor = next.map(|n| n.to_string());
     if is_htmx(&headers) && q.frag.is_some() {
-        return render(&headers, StatusCode::OK, PoolFragTpl { c, cards, next_cursor });
+        return render(
+            &headers,
+            StatusCode::OK,
+            PoolFragTpl {
+                c,
+                cards,
+                next_cursor,
+            },
+        );
     }
     let count_text = if count == 1 {
         c.t("pool.count_one").to_string()
@@ -595,7 +607,11 @@ pub async fn login_page(
         return render(&headers, StatusCode::OK, tpl);
     }
     if c.logged_in() {
-        let to = if next.is_empty() { "/match".to_string() } else { next };
+        let to = if next.is_empty() {
+            "/match".to_string()
+        } else {
+            next
+        };
         return redirect(&headers, &to);
     }
     let mut tpl = LoginTpl::new(c, "form", next.clone());
@@ -720,7 +736,11 @@ pub async fn login_confirm(
             return render(&headers, StatusCode::SERVICE_UNAVAILABLE, tpl);
         }
     };
-    let to = if next.is_empty() { "/match".to_string() } else { next };
+    let to = if next.is_empty() {
+        "/match".to_string()
+    } else {
+        next
+    };
     let mut res = redirect(&headers, &to);
     if let Ok(v) = HeaderValue::from_str(&auth::set_cookie_header(&value, false)) {
         res.headers_mut().append(header::SET_COOKIE, v);
@@ -728,7 +748,11 @@ pub async fn login_confirm(
     res
 }
 
-pub async fn logout_post(State(s): State<AppState>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+pub async fn logout_post(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     if !same_origin(&headers) {
         let c = ctx(&s, &headers, &uri, "").await;
         return csrf_page(c, &headers);
@@ -925,17 +949,12 @@ pub async fn drop_post(
         while let Ok(Some(mut field)) = mp.next_field().await {
             let name = field.name().unwrap_or("").to_string();
             if name == "voice_file" {
-                loop {
-                    match field.chunk().await {
-                        Ok(Some(chunk)) => {
-                            if file.len() + chunk.len() > app::VOICE_MAX_BYTES {
-                                too_big = true;
-                                break;
-                            }
-                            file.extend_from_slice(&chunk);
-                        }
-                        _ => break,
+                while let Ok(Some(chunk)) = field.chunk().await {
+                    if file.len() + chunk.len() > app::VOICE_MAX_BYTES {
+                        too_big = true;
+                        break;
                     }
+                    file.extend_from_slice(&chunk);
                 }
                 if too_big {
                     break;
@@ -1072,16 +1091,30 @@ struct MatchTpl {
     no_skills: bool,
 }
 
-pub async fn match_page(State(s): State<AppState>, headers: HeaderMap, uri: axum::http::Uri) -> Response {
+pub async fn match_page(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     let mut c = ctx(&s, &headers, &uri, "match").await;
     let Some(me) = c.user.clone() else {
         return login_redirect(&headers, &c);
     };
     let Some(pool) = &s.pool else {
-        return render(&headers, StatusCode::OK, MatchTpl { c, cards: Vec::new(), no_skills: false });
+        return render(
+            &headers,
+            StatusCode::OK,
+            MatchTpl {
+                c,
+                cards: Vec::new(),
+                no_skills: false,
+            },
+        );
     };
     let loaded = async {
-        let user = db::load_user(pool, me.id).await?.ok_or(DbError::NotFound("user".into()))?;
+        let user = db::load_user(pool, me.id)
+            .await?
+            .ok_or(DbError::NotFound("user".into()))?;
         let items = db::match_candidates(pool, me.id).await?;
         let ranked = RuleMatcher.match_items(&user, &items);
         let ids: Vec<Uuid> = ranked.iter().filter_map(|r| r.id.parse().ok()).collect();
@@ -1093,7 +1126,15 @@ pub async fn match_page(State(s): State<AppState>, headers: HeaderMap, uri: axum
         Ok(v) => v,
         Err(_) => {
             c.db_down = true;
-            return render(&headers, StatusCode::OK, MatchTpl { c, cards: Vec::new(), no_skills: false });
+            return render(
+                &headers,
+                StatusCode::OK,
+                MatchTpl {
+                    c,
+                    cards: Vec::new(),
+                    no_skills: false,
+                },
+            );
         }
     };
     let no_skills = user.can_do.is_empty() && user.looking_for.is_empty();
@@ -1101,7 +1142,9 @@ pub async fn match_page(State(s): State<AppState>, headers: HeaderMap, uri: axum
     let by_id: HashMap<String, &PoolRow> = rows.iter().map(|r| (r.id.to_string(), r)).collect();
     let mut cards = Vec::new();
     for (i, r) in ranked.iter().enumerate() {
-        let Some(row) = by_id.get(&r.id) else { continue };
+        let Some(row) = by_id.get(&r.id) else {
+            continue;
+        };
         let mut card = CardView::new(row, Some(&me), &reported, c.lang);
         // The matcher returns top-3 + one random "surprise" from the rest.
         card.surprise = i == 3;
@@ -1123,7 +1166,15 @@ pub async fn match_page(State(s): State<AppState>, headers: HeaderMap, uri: axum
         });
         cards.push(card);
     }
-    render(&headers, StatusCode::OK, MatchTpl { c, cards, no_skills })
+    render(
+        &headers,
+        StatusCode::OK,
+        MatchTpl {
+            c,
+            cards,
+            no_skills,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,7 +1435,11 @@ pub async fn revive_page(
         return login_redirect(&headers, &c);
     };
     let q = q.map(|Query(q)| q).unwrap_or_default();
-    let tab = if q.tab.as_deref() == Some("given") { "given" } else { "taken" };
+    let tab = if q.tab.as_deref() == Some("given") {
+        "given"
+    } else {
+        "taken"
+    };
     let mut tpl_revives = Vec::new();
     let mut tpl_given = Vec::new();
     let mut swapped = false;
@@ -1690,7 +1745,12 @@ pub async fn report_post(
         reason: f.reason.clone(),
     };
     let (status, msg, error, hidden) = match validate::validate_report(&raw) {
-        Err(_) => (StatusCode::BAD_REQUEST, None, Some("report.err_reason"), false),
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            None,
+            Some("report.err_reason"),
+            false,
+        ),
         Ok(v) => match db::create_report(&pool, me.id, v.project_id, &v.reason).await {
             Ok((_, true)) => (StatusCode::CREATED, Some("report.hidden"), None, true),
             Ok((_, false)) => (StatusCode::CREATED, Some("report.thanks"), None, false),
@@ -1705,10 +1765,26 @@ pub async fn report_post(
     if !is_htmx(&headers) {
         // Plain browser: a full page with the outcome and a way back.
         if let Some(e) = error {
-            return message(&headers, c, status, "report.action", e, &back, "common.retry");
+            return message(
+                &headers,
+                c,
+                status,
+                "report.action",
+                e,
+                &back,
+                "common.retry",
+            );
         }
         let m = msg.unwrap_or("report.thanks");
-        return message(&headers, c, status, "report.action", m, &back, "common.back_to_pool");
+        return message(
+            &headers,
+            c,
+            status,
+            "report.action",
+            m,
+            &back,
+            "common.back_to_pool",
+        );
     }
     render(
         &headers,
@@ -1732,7 +1808,14 @@ mod tests {
     fn next_is_site_relative_only() {
         assert_eq!(safe_next(Some("/match")), Some("/match".into()));
         assert_eq!(safe_next(Some("/take/x?y=1")), Some("/take/x?y=1".into()));
-        for bad in ["//evil.com", "https://evil.com", "/\\evil.com", "evil", "", "/a\nb"] {
+        for bad in [
+            "//evil.com",
+            "https://evil.com",
+            "/\\evil.com",
+            "evil",
+            "",
+            "/a\nb",
+        ] {
             assert_eq!(safe_next(Some(bad)), None, "{bad:?}");
         }
         assert_eq!(safe_next(None), None);
@@ -1748,9 +1831,15 @@ mod tests {
         assert!(same_origin(&h));
         let mut h = HeaderMap::new();
         h.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
-        h.insert(header::ORIGIN, HeaderValue::from_static("http://localhost:3000"));
+        h.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:3000"),
+        );
         assert!(same_origin(&h));
-        h.insert(header::ORIGIN, HeaderValue::from_static("https://evil.example"));
+        h.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
         assert!(!same_origin(&h));
         h.insert(header::ORIGIN, HeaderValue::from_static("null"));
         assert!(!same_origin(&h));

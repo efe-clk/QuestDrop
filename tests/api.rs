@@ -108,8 +108,12 @@ async fn drop_201_freezes_offer_and_outbox() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (status, json) =
-        post_drop(&app, &pool, drop_json("alice_1", "alice1@x.com", "Photo renamer")).await;
+    let (status, json) = post_drop(
+        &app,
+        &pool,
+        drop_json("alice_1", "alice1@x.com", "Photo renamer"),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED, "body: {json}");
     assert!(json.get("project_id").is_some());
     assert!(json.get("offer_id").is_some());
@@ -185,7 +189,12 @@ async fn drop_identity_mismatch_403() {
     let (s, _) = post_drop(&app, &pool, drop_json("carol_5", "carol5@x.com", "First")).await;
     assert_eq!(s, StatusCode::CREATED);
     // Carol's session naming another handle -> refused, no silent takeover.
-    let (s, _) = post_drop(&app, &pool, drop_json("mallory_5", "carol5@x.com", "Hijack")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("mallory_5", "carol5@x.com", "Hijack"),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     // Identity may be omitted: the session fills it in.
     let ck = login(&app, &pool, "carol5@x.com", None).await;
@@ -264,11 +273,26 @@ async fn match_returns_ranked_excluding_own() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (s, _) = post_drop(&app, &pool, drop_json("matcher_a", "matcha@x.com", "Rust CLI")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_a", "matcha@x.com", "Rust CLI"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, _) = post_drop(&app, &pool, drop_json("matcher_a", "matcha@x.com", "Rust bot")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_a", "matcha@x.com", "Rust bot"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, _) = post_drop(&app, &pool, drop_json("matcher_b", "matchb@x.com", "Go tool")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_b", "matchb@x.com", "Go tool"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
 
     let uid: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='matcher_b'")
@@ -367,7 +391,12 @@ async fn profile_upsert_drives_match_fit() {
         .unwrap()
         .to_string();
 
-    let (s, _) = post_drop(&app, &pool, drop_json("fitter_a", "fita@x.com", "Rust quest")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("fitter_a", "fita@x.com", "Rust quest"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
 
     let res = app
@@ -870,7 +899,12 @@ async fn third_report_hides_project() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (s, _) = post_drop(&app, &pool, drop_json("rep_a", "repa@x.com", "Flagged quest")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("rep_a", "repa@x.com", "Flagged quest"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     let project: String = sqlx::query_scalar(
         "SELECT p.id::text FROM projects p JOIN users u ON u.id=p.giver_id WHERE u.handle='rep_a'",
@@ -970,7 +1004,12 @@ async fn revive_returns_package_and_task() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (s, _) = post_drop(&app, &pool, drop_json("sw_b_rv", "swbrv@x.com", "B quest 2")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("sw_b_rv", "swbrv@x.com", "B quest 2"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     let offer_b2: String = sqlx::query_scalar(
         "SELECT o.id::text FROM swap_offers o JOIN projects p ON p.id=o.project_id WHERE p.title='B quest 2'",

@@ -11,14 +11,19 @@ info:
     except /v1/auth/callback and /v1/auth/logout is rate limited to 10
     requests per minute per client IP (leftmost X-Forwarded-For), answering
     429 with Retry-After. Without a database every DB-backed route answers 503.
-    Unknown paths answer a JSON 404, wrong methods a JSON 405, and a trailing
-    slash is redirected with 308.
+    Unknown paths answer a JSON 404 (browsers asking for text/html get the
+    web UI's 404 page), wrong methods a JSON 405, and a trailing slash is
+    redirected with 308.
+
+    The web UI (/, /login, /drop, /match, /take/{offer_id}, /revive, /me,
+    /q/{id}) is server-rendered HTML in the same binary and is described in
+    docs/web-ui.md, not here.
 servers:
   - url: http://localhost:3000
 paths:
   /:
     get:
-      summary: Placeholder home page (Askama HTML with the open-pool count)
+      summary: Web UI pool page (HTML; see docs/web-ui.md)
       responses:
         '200':
           description: html
@@ -48,8 +53,8 @@ paths:
       summary: Request a magic-link email (15-min single-use token)
       description: >
         Sends `BASE_URL/login?token=...` through SMTP (when SMTP_URL is set)
-        or writes it to the log. NOTE: no /login page exists yet; a client
-        must read the token from that URL and POST it to /v1/auth/callback.
+        or writes it to the log. The web UI's /login page shows a button that
+        redeems the token; API clients POST it to /v1/auth/callback.
       requestBody:
         required: true
         content:
@@ -108,12 +113,41 @@ paths:
           $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
+  /v1/me/offers:
+    get:
+      summary: Every quest the session user dropped, newest first (LOGIN REQUIRED)
+      description: >
+        OPEN items carry `offer_id`, which is what POST /v1/swaps needs as
+        `give_offer_id`. Status shows where each quest is now.
+      responses:
+        '200':
+          description: own quests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  offers:
+                    type: array
+                    items:
+                      allOf:
+                        - {$ref: '#/components/schemas/PoolRow'}
+                        - type: object
+                          properties:
+                            status: {type: string, enum: [OPEN, MATCHED, CLOSED]}
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /v1/voice:
     post:
-      summary: Upload an mp3 (LOGIN REQUIRED)
+      summary: Upload a voice note (LOGIN REQUIRED)
       description: >
-        5 MB cap, ID3 or MPEG frame-sync magic bytes, stored under a random
-        name. Duration is NOT checked. Refused with 507 once VOICE_DIR reaches
+        5 MB cap. Accepts mp3 (ID3 / MPEG frame sync) and what browsers record
+        natively: Opus in ogg (`OggS`) or webm (EBML), AAC in mp4 (`ftyp`).
+        Stored under a random name with the sniffed extension (.mp3, .ogg,
+        .webm, .m4a). Duration is NOT checked server-side; the web recorder
+        enforces 10-60 s. Refused with 507 once VOICE_DIR reaches
         VOICE_QUOTA_MB (default 500).
       requestBody:
         required: true
@@ -128,7 +162,7 @@ paths:
                   format: binary
       responses:
         '201':
-          description: '{"voice_url": "/voice/<uuid>.mp3"}'
+          description: '{"voice_url": "/voice/<uuid>.<mp3|ogg|webm|m4a>"}'
         '400':
           $ref: '#/components/responses/Problem'
         '401':
@@ -143,20 +177,20 @@ paths:
           $ref: '#/components/responses/Problem'
   /voice/{file}:
     get:
-      summary: Stored mp3 files
+      summary: Stored voice files
       parameters:
         - {name: file, in: path, required: true, schema: {type: string}}
       responses:
         '200':
-          description: mp3 bytes
+          description: audio bytes
         '404':
           description: no such file
   /v1/projects:
     get:
       summary: OPEN pool, newest first, cursor pages (limit default 20, max 50)
       description: >
-        Items carry the PROJECT id only. POST /v1/swaps needs OFFER ids, which
-        this response does not expose yet (see docs/plan.md, phase 5).
+        Items carry the project `id` and its OPEN `offer_id` (what POST
+        /v1/swaps takes as `take_offer_id`).
       parameters:
         - {name: cursor, in: query, schema: {type: string, format: uuid}, description: 'last project id of the previous page; unknown ids restart from the top'}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
@@ -177,11 +211,12 @@ paths:
         '503':
           $ref: '#/components/responses/Problem'
     post:
-      summary: Drop a quest (no login; max 3 per giver in any 24 h)
+      summary: Drop a quest (LOGIN REQUIRED; max 3 per giver in any 24 h)
       description: >
-        Creates the user from handle + email if new (an existing email with a
-        different handle is 409). One transaction writes the project, its
-        open offer and a `swap.created` outbox event. A `/voice/...` voice_url
+        The giver is the session user. `handle` and `email` may be omitted;
+        if sent they must match the session (else 403), so nobody can drop
+        in someone else's name. One transaction writes the project, its open
+        offer and a `swap.created` outbox event. A `/voice/...` voice_url
         must point at an existing file.
       requestBody:
         required: true
@@ -201,10 +236,34 @@ paths:
                   offer_id: {type: string, format: uuid}
         '400':
           $ref: '#/components/responses/Problem'
-        '409':
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
           $ref: '#/components/responses/Problem'
         '429':
           description: daily cap (Retry-After = seconds until the oldest counted drop expires) or IP rate limit
+        '503':
+          $ref: '#/components/responses/Problem'
+  /v1/projects/{id}:
+    get:
+      summary: One project by id (OPEN or MATCHED; reported-away ones are 404)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200':
+          description: project
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/PoolRow'}
+                  - type: object
+                    properties:
+                      status: {type: string, enum: [OPEN, MATCHED]}
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
   /v1/users/upsert:
@@ -234,15 +293,17 @@ paths:
           $ref: '#/components/responses/Problem'
   /v1/match:
     get:
-      summary: Rank the OPEN pool for a user (no login)
+      summary: Rank the OPEN pool for the session user (LOGIN REQUIRED)
       description: >
+        Matches reveal a skill profile, so only the session owner may ask.
+        `user_id` is optional; if given it must equal the session user (403).
         Considers up to 100 of the newest OPEN projects not owned by the user.
         `rule` (default) returns top-3 + 1 random surprise, score = 0.8 x skill
         fit + 0.2 x random; time_bucket and energy are not scored.
         `embedding` returns the top 4 by trigram cosine, deterministic.
-        Item `id` is a PROJECT id.
+        Item `id` is a PROJECT id; `offer_id` is its OPEN offer.
       parameters:
-        - {name: user_id, in: query, required: true, schema: {type: string, format: uuid}}
+        - {name: user_id, in: query, required: false, schema: {type: string, format: uuid}}
         - {name: algo, in: query, required: false, schema: {type: string, enum: [rule, embedding], default: rule}}
       responses:
         '200':
@@ -256,6 +317,10 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/RankedItem'}
         '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
           $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
@@ -302,9 +367,9 @@ paths:
           $ref: '#/components/responses/Problem'
   /v1/revive:
     get:
-      summary: All completed takes, newest first, with freeze package + first 2-min task (no login)
+      summary: The session user's completed takes, newest first, with freeze package + first 2-min task (LOGIN REQUIRED)
       parameters:
-        - {name: user_id, in: query, required: true, schema: {type: string, format: uuid}}
+        - {name: user_id, in: query, required: false, schema: {type: string, format: uuid}, description: 'optional; must equal the session user (403)'}
       responses:
         '200':
           description: revives list
@@ -317,6 +382,10 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/Revive'}
         '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '403':
           $ref: '#/components/responses/Problem'
         '404':
           description: no completed swaps yet
@@ -365,14 +434,14 @@ components:
         errors: {type: array, items: {type: string}, description: 'every failed validation rule'}
     Drop:
       type: object
-      required: [handle, email, title, one_liner, link_url, voice_url, time_bucket, energy]
+      required: [title, one_liner, link_url, voice_url, time_bucket, energy]
       properties:
-        handle: {type: string, pattern: '^[a-z0-9_]{3,24}$'}
-        email: {type: string, maxLength: 254}
+        handle: {type: string, pattern: '^[a-z0-9_]{3,24}$', description: 'optional; must equal the session user'}
+        email: {type: string, maxLength: 254, description: 'optional; must equal the session user'}
         title: {type: string, minLength: 3, maxLength: 80}
         one_liner: {type: string, minLength: 10, maxLength: 200}
         link_url: {type: string, maxLength: 2048, description: 'http(s) URL'}
-        voice_url: {type: string, maxLength: 2048, description: '/voice/*.mp3 path or http(s) URL whose path ends in .mp3'}
+        voice_url: {type: string, maxLength: 2048, description: '/voice/* path or http(s) URL whose path ends in .mp3, .ogg, .opus, .webm or .m4a'}
         skill_needed: {type: array, items: {type: string, maxLength: 32}, description: 'lowercased, deduplicated, first 10 kept'}
         time_bucket: {type: string, enum: [S, M, L], description: 'case-insensitive; S <2h, M 2-8h, L >8h'}
         energy: {type: string, enum: [LOW, MID, HIGH], description: case-insensitive}
@@ -420,6 +489,7 @@ components:
         energy: {type: string, enum: [LOW, MID, HIGH]}
         giver_handle: {type: string}
         created_at: {type: string, format: date-time}
+        offer_id: {type: string, format: uuid, nullable: true, description: 'OPEN offer of this project; null once matched or closed'}
     RankedItem:
       type: object
       properties:
@@ -429,6 +499,7 @@ components:
         energy: {type: string}
         score: {type: number}
         reason: {type: string, example: 'fit=0.50 rand=0.31'}
+        offer_id: {type: string, format: uuid, nullable: true}
     Revive:
       type: object
       properties:

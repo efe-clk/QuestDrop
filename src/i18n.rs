@@ -130,13 +130,22 @@ mod tests {
         assert_eq!(t(Lang::Tr, "nav.pool"), "Havuz");
         assert_eq!(t(Lang::En, "nav.pool"), "Pool");
         assert_eq!(t(Lang::En, "no.such.key"), "no.such.key");
-        assert_eq!(tf(Lang::En, "match.fit_pct", 50), "Overlaps 50% with your skills");
+        assert_eq!(
+            tf(Lang::En, "match.fit_pct", 50),
+            "Overlaps 50% with your skills"
+        );
     }
 
     #[test]
     fn accept_language() {
-        assert_eq!(Lang::from_accept_language("tr-TR,tr;q=0.9,en;q=0.8"), Some(Lang::Tr));
-        assert_eq!(Lang::from_accept_language("de-DE,en-US;q=0.7"), Some(Lang::En));
+        assert_eq!(
+            Lang::from_accept_language("tr-TR,tr;q=0.9,en;q=0.8"),
+            Some(Lang::Tr)
+        );
+        assert_eq!(
+            Lang::from_accept_language("de-DE,en-US;q=0.7"),
+            Some(Lang::En)
+        );
         assert_eq!(Lang::from_accept_language("de"), None);
     }
 }
