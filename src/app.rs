@@ -1,11 +1,10 @@
 use std::{net::IpAddr, net::SocketAddr, sync::Arc, time::Duration};
 
-use askama::Template;
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -20,6 +19,7 @@ use crate::{
     matcher::{Matcher, RuleMatcher},
     ratelimit::RateLimiter,
     validate::{validate_drop, validate_profile, validate_report, RawDrop, RawProfile, RawReport},
+    web,
 };
 
 #[derive(Clone)]
@@ -28,12 +28,6 @@ pub struct AppState {
     pub voice_dir: std::path::PathBuf,
     pub session_secret: Vec<u8>,
     pub mailer: std::sync::Arc<dyn auth::Mailer>,
-}
-
-#[derive(Template)]
-#[template(path = "index.html")]
-struct IndexTemplate {
-    pool_count: i64,
 }
 
 #[derive(Serialize)]
@@ -77,7 +71,7 @@ fn problem_errors(
     )
 }
 
-fn db_error(e: DbError) -> Response {
+pub(crate) fn db_error(e: DbError) -> Response {
     match e {
         DbError::Conflict(d) => problem(StatusCode::CONFLICT, d).into_response(),
         DbError::NotFound(d) => problem(StatusCode::NOT_FOUND, d).into_response(),
@@ -97,27 +91,6 @@ fn db_error(e: DbError) -> Response {
             // Never leak driver internals to clients; full error goes to logs.
             tracing::error!(error = %inner, "database failure");
             problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response()
-        }
-        // Only reachable if a code path forgets to consume it (create_drop
-        // always retries internally); fail safe as a transient error.
-        DbError::RetryTx => problem(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "concurrent write, please retry",
-        )
-        .into_response(),
-    }
-}
-
-async fn index(State(s): State<AppState>) -> Response {
-    let count = match &s.pool {
-        Some(p) => db::count_open(p).await.unwrap_or(0),
-        None => 0,
-    };
-    match (IndexTemplate { pool_count: count }).render() {
-        Ok(html) => Html(html).into_response(),
-        Err(e) => {
-            tracing::error!(error = %e, "template render failed");
-            problem(StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
         }
     }
 }
@@ -171,6 +144,7 @@ struct MatchQuery {
 
 async fn match_pool(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     q: Result<Query<MatchQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let Some(pool) = &s.pool else {
@@ -182,9 +156,19 @@ async fn match_pool(
             return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
         }
     };
-    let Some(uid) = q.user_id else {
-        return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
+    // Matches reveal a user's skill profile: only the session owner may ask
+    // (design §6). user_id stays optional for older clients but must agree.
+    let uid = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
     };
+    if q.user_id.is_some_and(|q| q != uid) {
+        return problem(
+            StatusCode::FORBIDDEN,
+            "user_id does not match the logged-in user",
+        )
+        .into_response();
+    }
     let user = match db::load_user(pool, uid).await {
         Ok(Some(u)) => u,
         Ok(None) => return problem(StatusCode::NOT_FOUND, "unknown user").into_response(),
@@ -213,18 +197,44 @@ async fn match_pool(
 
 async fn create_project(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     raw: Result<Json<RawDrop>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Some(pool) = &s.pool else {
         return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
     };
     // Malformed JSON gets the same RFC 9457 shape as validation errors.
-    let raw = match raw {
+    let mut raw = match raw {
         Ok(Json(r)) => r,
         Err(e) => {
             return problem_errors(e.status(), "invalid JSON", vec![e.body_text()]).into_response();
         }
     };
+    // Drops need a session (web-ui §5.2): otherwise anyone could drop in
+    // someone else's name. Identity comes from the session; a body that
+    // names a different handle/email is refused rather than ignored.
+    let actor = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let me = match db::user_info(pool, actor).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return problem(StatusCode::UNAUTHORIZED, "login required").into_response(),
+        Err(e) => return db_error(e),
+    };
+    let body_handle = raw.handle.trim();
+    let body_email = raw.email.trim().to_lowercase();
+    if (!body_handle.is_empty() && body_handle != me.handle)
+        || (!body_email.is_empty() && body_email != me.email)
+    {
+        return problem(
+            StatusCode::FORBIDDEN,
+            "drop identity does not match the logged-in user",
+        )
+        .into_response();
+    }
+    raw.handle = me.handle.clone();
+    raw.email = me.email.clone();
     let valid = match validate_drop(&raw) {
         Ok(v) => v,
         Err(errs) => {
@@ -241,7 +251,7 @@ async fn create_project(
         )
         .into_response();
     }
-    match db::create_drop(pool, &valid).await {
+    match db::create_drop_as(pool, actor, &valid).await {
         Ok((project_id, offer_id)) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "project_id": project_id, "offer_id": offer_id })),
@@ -334,7 +344,10 @@ async fn ready(State(s): State<AppState>) -> Response {
 /// IP shared by everyone, so the leftmost X-Forwarded-For entry wins.
 /// Trust assumption: a single honest proxy (Fly) sets the header; a client
 /// spoofing it only spends from a bucket nobody else uses.
-fn client_ip(req: &Request<axum::body::Body>, conn: Option<ConnectInfo<SocketAddr>>) -> IpAddr {
+pub(crate) fn client_ip(
+    req: &Request<axum::body::Body>,
+    conn: Option<ConnectInfo<SocketAddr>>,
+) -> IpAddr {
     if let Some(v) = req.headers().get("x-forwarded-for") {
         if let Ok(s) = v.to_str() {
             if let Some(first) = s.split(',').next() {
@@ -427,6 +440,7 @@ struct ReviveQuery {
 
 async fn revive(
     State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
     q: Result<Query<ReviveQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let Some(pool) = &s.pool else {
@@ -438,9 +452,17 @@ async fn revive(
             return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
         }
     };
-    let Some(uid) = q.user_id else {
-        return problem(StatusCode::BAD_REQUEST, "user_id is required").into_response();
+    let uid = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
     };
+    if q.user_id.is_some_and(|q| q != uid) {
+        return problem(
+            StatusCode::FORBIDDEN,
+            "user_id does not match the logged-in user",
+        )
+        .into_response();
+    }
     match db::all_revives(pool, uid).await {
         Ok(list) if !list.is_empty() => {
             Json(serde_json::json!({ "revives": list })).into_response()
@@ -493,7 +515,7 @@ async fn create_report(
 
 /// Session identity (or 401/503). Swaps, reports and profile edits carry
 /// value or moderation weight, so they require it; drops stay open intake.
-async fn session_user(
+pub(crate) async fn session_user(
     s: &AppState,
     headers: &axum::http::HeaderMap,
 ) -> Result<uuid::Uuid, Box<Response>> {
@@ -505,22 +527,49 @@ async fn session_user(
             problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response(),
         ));
     };
-    let cookie = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|c| {
-            c.split(';').find_map(|p| {
-                let (k, v) = p.split_once('=')?;
-                (k.trim() == COOKIE_NAME).then(|| v.trim().to_string())
-            })
-        });
-    let Some(value) = cookie else {
+    let Some(value) = session_cookie(headers) else {
         return Err(unauthorized());
     };
     match auth::load_session_user(pool, &s.session_secret, &value).await {
         Ok(Some(uid)) => Ok(uid),
         Ok(None) => Err(unauthorized()),
         Err(e) => Err(Box::new(db_error(DbError::Db(e)))),
+    }
+}
+
+/// Raw value of the session cookie, if the request carries one.
+pub(crate) fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    cookie_value(headers, COOKIE_NAME)
+}
+
+pub(crate) fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .find_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            (k.trim() == name).then(|| v.trim().to_string())
+        })
+}
+
+/// One project by id (any status) for shareable quest pages.
+async fn get_project(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let Ok(id) = id.parse::<uuid::Uuid>() else {
+        return problem(StatusCode::BAD_REQUEST, "invalid project id").into_response();
+    };
+    match db::get_project(pool, id).await {
+        // Reported-away quests stay hidden from the public API.
+        Ok(Some(p)) if p.status != "CLOSED" => Json(p).into_response(),
+        Ok(_) => problem(StatusCode::NOT_FOUND, "unknown project").into_response(),
+        Err(e) => db_error(e),
     }
 }
 
@@ -599,16 +648,7 @@ async fn auth_callback(State(s): State<AppState>, Json(raw): Json<AuthCallback>)
 
 async fn auth_logout(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     if let Some(pool) = &s.pool {
-        if let Some(cookie) = headers
-            .get(axum::http::header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|c| {
-                c.split(';').find_map(|p| {
-                    let (k, v) = p.split_once('=')?;
-                    (k.trim() == COOKIE_NAME).then(|| v.trim().to_string())
-                })
-            })
-        {
+        if let Some(cookie) = session_cookie(&headers) {
             let _ = auth::destroy_session(pool, &s.session_secret, &cookie).await;
         }
     }
@@ -690,14 +730,15 @@ async fn my_offers(
 /// Voice upload (session required): streams the "file" field, enforces a
 /// 5MB cap while reading (the global 2MB default is disabled for this route),
 /// sniffs the container from magic bytes, stores under a random name so
-/// client filenames can never traverse. Duration check stays pending.
-const VOICE_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// client filenames can never traverse. Duration (10-60 s) is enforced by
+/// the web recorder, not here.
+pub(crate) const VOICE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 /// File extension for a supported voice container, from its magic bytes.
 /// mp3 (ID3 or MPEG frame sync), Ogg (Opus/Vorbis, Firefox recordings),
 /// WebM/Matroska (Opus, Chrome recordings), ISO-BMFF `ftyp` (AAC, Safari
 /// recordings). The codec inside is not inspected.
-fn sniff_audio(head: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff_audio(head: &[u8]) -> Option<&'static str> {
     if head.len() < 4 {
         return None;
     }
@@ -716,6 +757,56 @@ fn sniff_audio(head: &[u8]) -> Option<&'static str> {
     None
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum VoiceError {
+    TooLarge,
+    NotAudio,
+    Full,
+    Storage,
+}
+
+impl VoiceError {
+    pub(crate) fn into_problem(self) -> Response {
+        match self {
+            VoiceError::TooLarge => problem(StatusCode::PAYLOAD_TOO_LARGE, "voice max 5MB"),
+            VoiceError::NotAudio => problem(
+                StatusCode::BAD_REQUEST,
+                "unsupported audio: mp3, ogg, webm or m4a required",
+            ),
+            VoiceError::Full => problem(StatusCode::INSUFFICIENT_STORAGE, "voice storage full"),
+            VoiceError::Storage => problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed"),
+        }
+        .into_response()
+    }
+}
+
+/// Disk-exhaustion guard: refuse new uploads past the quota (default 500MB).
+pub(crate) fn voice_quota_full(dir: &std::path::Path) -> bool {
+    let quota: u64 = std::env::var("VOICE_QUOTA_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    voice_dir_usage(dir) >= quota.saturating_mul(1024 * 1024)
+}
+
+/// Validates and stores one voice file; returns its `/voice/...` URL.
+pub(crate) async fn save_voice(dir: &std::path::Path, bytes: &[u8]) -> Result<String, VoiceError> {
+    if bytes.len() > VOICE_MAX_BYTES {
+        return Err(VoiceError::TooLarge);
+    }
+    let Some(ext) = sniff_audio(bytes) else {
+        return Err(VoiceError::NotAudio);
+    };
+    if voice_quota_full(dir) {
+        return Err(VoiceError::Full);
+    }
+    let name = format!("{}.{ext}", uuid::Uuid::new_v4());
+    tokio::fs::write(dir.join(&name), bytes)
+        .await
+        .map_err(|_| VoiceError::Storage)?;
+    Ok(format!("/voice/{name}"))
+}
+
 async fn upload_voice(
     State(s): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -725,13 +816,8 @@ async fn upload_voice(
         Ok(u) => u,
         Err(r) => return *r,
     };
-    // Disk-exhaustion guard: refuse new uploads past the quota (default 500MB).
-    let quota: u64 = std::env::var("VOICE_QUOTA_MB")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(500);
-    if voice_dir_usage(&s.voice_dir) >= quota.saturating_mul(1024 * 1024) {
-        return problem(StatusCode::INSUFFICIENT_STORAGE, "voice storage full").into_response();
+    if voice_quota_full(&s.voice_dir) {
+        return VoiceError::Full.into_problem();
     };
     let mut mp = match mp {
         Ok(m) => m,
@@ -761,26 +847,14 @@ async fn upload_voice(
                 }
             }
         }
-        let Some(ext) = sniff_audio(&bytes) else {
-            return problem(
-                StatusCode::BAD_REQUEST,
-                "unsupported audio: mp3, ogg, webm or m4a required",
+        return match save_voice(&s.voice_dir, &bytes).await {
+            Ok(url) => (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "voice_url": url })),
             )
-            .into_response();
+                .into_response(),
+            Err(e) => e.into_problem(),
         };
-        let name = format!("{}.{ext}", uuid::Uuid::new_v4());
-        if tokio::fs::write(s.voice_dir.join(&name), &bytes)
-            .await
-            .is_err()
-        {
-            return problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed")
-                .into_response();
-        }
-        return (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "voice_url": format!("/voice/{name}") })),
-        )
-            .into_response();
     }
     problem(
         StatusCode::BAD_REQUEST,
@@ -824,6 +898,20 @@ fn security_headers(router: Router<AppState>) -> Router<AppState> {
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         ))
+        // web-ui §9. blob: in media-src lets the recorder preview a take
+        // before upload; https: allows external voice links (labelled).
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; media-src 'self' https: blob:; img-src 'self' data:; \
+                 script-src 'self'; style-src 'self'; frame-ancestors 'none'; \
+                 base-uri 'self'; form-action 'self'; object-src 'none'",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("microphone=(self), camera=(), geolocation=()"),
+        ))
 }
 
 pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
@@ -843,8 +931,55 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         session_secret: auth::session_secret(),
         mailer: std::sync::Arc::from(auth::mailer_from_env()),
     };
+    let ui_login = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_confirm = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_drop = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_take = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_report = Arc::new(RateLimiter::new(10, Duration::from_secs(60)));
+    let ui_me = Arc::new(RateLimiter::new(20, Duration::from_secs(60)));
+    let limit = |l: &Arc<RateLimiter>| middleware::from_fn_with_state(l.clone(), web::ui_limit);
     let router = Router::new()
-        .route("/", get(index))
+        // --- Web UI (docs/web-ui.md) ---
+        .route("/", get(web::pool_page))
+        .route("/lang/:code", get(web::set_lang))
+        // Limiters guard the POSTs only; page views are never throttled.
+        .route(
+            "/login",
+            get(web::login_page).merge(post(web::login_post).route_layer(limit(&ui_login))),
+        )
+        .route(
+            "/login/confirm",
+            post(web::login_confirm).route_layer(limit(&ui_confirm)),
+        )
+        .route("/logout", post(web::logout_post))
+        .route(
+            "/drop",
+            get(web::drop_page).merge(
+                post(web::drop_post)
+                    .route_layer(limit(&ui_drop))
+                    // Form + optional voice file (no-JS path): 5MB voice + fields.
+                    .route_layer(axum::extract::DefaultBodyLimit::max(
+                        VOICE_MAX_BYTES + 64 * 1024,
+                    )),
+            ),
+        )
+        .route("/match", get(web::match_page))
+        .route(
+            "/take/:offer_id",
+            get(web::take_page).merge(post(web::take_post).route_layer(limit(&ui_take))),
+        )
+        .route("/revive", get(web::revive_page))
+        .route(
+            "/me",
+            get(web::me_page).merge(post(web::me_post).route_layer(limit(&ui_me))),
+        )
+        .route("/q/:id", get(web::quest_page))
+        .route(
+            "/report/:id",
+            post(web::report_post).route_layer(limit(&ui_report)),
+        )
+        .nest_service("/static", ServeDir::new(static_dir()))
+        // --- API ---
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route(
@@ -856,6 +991,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/me", get(me))
         .route("/v1/me/offers", get(my_offers))
+        .route("/v1/projects/:id", get(get_project))
         .route("/v1/projects", get(list_projects))
         .route(
             "/v1/projects",
@@ -902,7 +1038,11 @@ async fn method_not_allowed() -> Response {
 
 /// Unmatched paths: trim one trailing slash via 308 (idempotent, so no
 /// loops), otherwise return a shaped JSON 404 instead of Axum's default text.
-async fn fallback_404(uri: axum::http::Uri) -> Response {
+async fn fallback_404(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
     let path = uri.path();
     if path.len() > 1 && path.ends_with('/') {
         let q = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -913,7 +1053,24 @@ async fn fallback_404(uri: axum::http::Uri) -> Response {
             return res;
         }
     }
+    // Browser navigations get a page; API clients keep the JSON shape.
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    if wants_html && !path.starts_with("/v1/") {
+        return web::not_found_page(&s, &headers, &uri).await;
+    }
     problem(StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+/// Static assets (CSS, JS, vendored HTMX). STATIC_DIR overrides; the
+/// default resolves next to the crate so tests and `cargo run` agree.
+fn static_dir() -> std::path::PathBuf {
+    match std::env::var("STATIC_DIR") {
+        Ok(d) if !d.is_empty() => d.into(),
+        _ => std::path::PathBuf::from("./static"),
+    }
 }
 
 /// Flat-dir disk usage in bytes (voice files live directly in VOICE_DIR).
@@ -930,7 +1087,7 @@ fn voice_dir_usage(dir: &std::path::Path) -> u64 {
 
 /// Defense in depth next to validation: refuse /voice/ URLs whose file is
 /// absent (or escapes the dir) so the pool never lists dead voice links.
-fn voice_file_exists(dir: &std::path::Path, url: &str) -> bool {
+pub(crate) fn voice_file_exists(dir: &std::path::Path, url: &str) -> bool {
     let rel = url.strip_prefix("/voice/").unwrap_or("");
     if rel.is_empty() || rel.contains("..") {
         return false;

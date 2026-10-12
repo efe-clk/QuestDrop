@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("take.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="narrow narrow--wide">
+  <h1 class="page__h">{{ c.t("take.title") }}</h1>
+
+  {% if state == "notfound" %}
+  <div class="empty">
+    <p class="empty__h">{{ c.t("take.not_found") }}</p>
+    <a class="btn btn--primary" href="/match">{{ c.t("common.see_matches") }}</a>
+  </div>
+  {% else %}
+
+  {% if let Some(q) = card %}{% include "partials/card.html" %}{% endif %}
+
+  {% if state == "gone" %}
+  <div class="alert alert--calm" role="status">
+    <p>{{ c.t("take.gone") }}</p>
+    <a class="btn btn--primary btn--sm" href="/match">{{ c.t("common.see_matches") }}</a>
+  </div>
+  {% else if state == "own" %}
+  <div class="alert alert--calm" role="status">
+    <p>{{ c.t("take.own") }}</p>
+    <a class="btn btn--secondary btn--sm" href="/match">{{ c.t("common.see_matches") }}</a>
+  </div>
+  {% else if state == "none" %}
+  <div class="alert alert--calm">
+    <p class="alert__h">{{ c.t("take.none_title") }}</p>
+    <p>{{ c.t("take.none_body") }}</p>
+    <a class="btn btn--primary btn--sm" href="/drop?next=/take/{{ offer_id }}">{{ c.t("take.none_cta") }}</a>
+  </div>
+  {% else %}
+  <form class="form give" method="post" action="/take/{{ offer_id }}" hx-disabled-elt="find button[type=submit]">
+    <input type="hidden" name="idem" value="{{ idem }}">
+    {% if let Some(e) = error %}<div class="alert" role="alert"><p>{{ e }}</p></div>{% endif %}
+    <fieldset class="field">
+      <legend class="label label--lg">{{ c.t("take.give_legend") }}</legend>
+      <p class="help">{{ c.t("take.two_way") }}</p>
+      <div class="give__list">
+        {% for m in mine %}
+        <label class="give__opt">
+          <input type="radio" name="give_offer_id" value="{{ m.offer_id }}" required{% if m.checked %} checked{% endif %}>
+          <span class="give__face">
+            <span class="give__t">{{ m.title }}</span>
+            <span class="give__s">{{ m.one_liner }}</span>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <button class="btn btn--primary btn--lg btn--block" type="submit"{% if c.db_down %} disabled{% endif %}>{{ c.t("take.submit") }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+{% endblock %}

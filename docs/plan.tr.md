@@ -2,8 +2,8 @@
 
 # QuestDrop — Rust Yapım Planı
 
-Durum (2026-10-12): **Backend bitti, web arayüzü açık, yayında değil.**
-Faz 0-4 ile B ve C API seviyesinde yazıldı (50 test yeşil). Faz 1-4'ün kullanıcıya bakan yarısı (formlar ve sayfalar) hiç yapılmadı. Faz 5 bunu kapsar.
+Durum (2026-10-12): **Backend ve web arayüzü bitti, yayında değil.**
+Faz 0-5 ile B ve C yazıldı: API ve üstündeki tarayıcı sayfaları (64 Rust testi + tarayıcı E2E'si, hepsi yeşil).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
@@ -15,69 +15,54 @@ Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
 Bitti: `cargo run` ana sayfa + health sunar.
 
-## Faz 1 — Bırak + Dondur ✅ API · ❌ UI
+## Faz 1 — Bırak + Dondur ✅
 
 1. Tablolar: users, projects, swap_offers, outbox_events
 2. `POST /v1/projects`: link + ses zorunlu, time_bucket + energy validasyonu
 3. Dondur: proje (OPEN) + teklif (OPEN) + outbox olayı tek transaction'da
 
-Bitti: API bırakmaları kaydeder, havuzda listeler. Eksik: bırakma formu.
+Bitti: API bırakmaları kaydeder, havuzda listeler; web bırakma formu (faz 5) bunu kullanır.
 
-## Faz 2 — Eşleş ✅ API · ❌ UI
+## Faz 2 — Eşleş ✅
 
 1. `trait Matcher`, `RuleMatcher`: %80 yetenek uyumu + %20 rastgele (süre/enerji henüz skora girmiyor)
 2. `GET /v1/match?user_id=`: top-3 + 1 sürpriz
 3. Unit test: skor sırası ve aralığı
 
-Eksik: eşleşme sayfası.
+Arayüz: `/match`.
 
-## Faz 3 — Atomik takas ✅ API · ❌ UI
+## Faz 3 — Atomik takas ✅
 
 1. `POST /v1/swaps`, `Idempotency-Key` ile, id sırasıyla `SELECT ... FOR UPDATE`
 2. Tek transaction: iki teklif → MATCHED, match satırı, outbox olayı
 3. Integration test: çift kapma engellenir, aynı anahtar yarışı 1×201 + 4×200 verir
 
-Eksik: takas onay akışı.
+Arayüz: `/take/{offer_id}`.
 
-## Faz 4 — Canlandır + Moderasyon ✅ API · ❌ UI
+## Faz 4 — Canlandır + Moderasyon ✅
 
 1. Canlandır: freeze paketi + ilk 2 dakika görevi
 2. Kurallar: günde max 3 bırakma, kendinle eşleşme yok, 3 report = oto-gizle
 3. RFC 9457 hatalar, cursor sayfalama
 
-Eksik: canlandır sayfası, report butonu ve tarayıcıdan bırak → eşleş → al E2E'si.
+Arayüz: `/revive` ve her kartta şikâyet menüsü.
 
 ## B / C ✅ (v1)
 
 - B: outbox publisher + `bot` binary, log sink ya da Discord webhook sink.
 - C: `EmbeddingMatcher` (yerel trigram + kosinüs), `?algo=embedding` ile.
 
-## Faz 5 — Web arayüzü (açık)
+## Faz 5 — Web arayüzü ✅
 
-Aynı binary içinde server-render Askama + HTMX sayfaları; böylece oturum cookie'si CORS'suz çalışır. Ayrıntılı arayüz tasarımı: [web-ui.tr.md](./web-ui.tr.md).
+Aynı binary içinde server-render Askama + HTMX sayfaları (`src/web.rs`, `templates/`, `static/`); oturum cookie'si CORS'suz çalışır. Sözleşme: [web-ui.tr.md](./web-ui.tr.md). Her form JavaScript olmadan da çalışır; HTMX (`hx-boost`) sadece hızlandırır.
 
-Sayfalar:
+Sayfalar: `/` havuz (cursor ile "daha fazla göster"), `/login` (+ `?token=` onay butonu), `/drop` (tarayıcıdan kayıt + dosya yükleme), `/match`, `/take/{offer_id}`, `/revive` (aldıklarım / bıraktıklarım, ilk 2 dakika), `/me`, `/q/{id}` (paylaşılabilir, Open Graph), kartlarda şikâyet menüsü, çıkış. İngilizce + Türkçe (`i18n/*.toml`).
 
-1. `/` havuz listesi (`GET /v1/projects`, cursor ile "daha fazla")
-2. Bırakma formu + mp3 yükleme (önce `POST /v1/voice`, sonra `POST /v1/projects`)
-3. Giriş: e-posta formu (`POST /v1/auth/request`) ve token'ı `/v1/auth/callback`'e POST eden **`/login?token=`**
-4. Profil: `can_do` / `looking_for` (`POST /v1/users/upsert`)
-5. "Al" butonlu eşleşme listesi (`GET /v1/match`, `POST /v1/swaps`)
-6. Canlandır sayfası (`GET /v1/revive`)
-7. Report butonu (`POST /v1/reports`) ve çıkış
+Bunun için kapatılan API eksikleri (web-ui §10): `/login` sayfası (link hedefi `LOGIN_URL` ile ayarlanabilir); havuz, eşleşme ve proje satırlarında `offer_id`; `GET /v1/me/offers?status=`; `GET /v1/projects/{id}`; ses mp3'ün yanında Opus (webm/ogg) ve AAC (m4a) kabul eder; bırakma, `/v1/match` ve `/v1/revive` login ister; ölü `/v1/match` linki kaldırıldı. CORS gerekmiyor (aynı origin).
 
-Bu faz öncesinde ya da sırasında kapatılacak API eksikleri:
+Testler: `tests/web.rs` (sayfalar, giriş akışı, CSRF, bırakma validasyonu + günlük sınır + JS'siz yükleme, eşleş → al → canlandır, idempotent çift gönderim, yarış durumu, şikâyet + otomatik gizleme, sayfalama parçası, DB yok) ve `e2e/` (Playwright: iki kullanıcı, sahte mikrofonla kayıt, gerçek yarış, axe, 360/768/1280 açık/koyu ekran görüntüleri).
 
-| # | Eksik | Arayüzü neden engelliyor |
-|---|---|---|
-| 1 | ✅ 2026-10-12: e-postadaki linkin hedefi ayarlanabilir (`LOGIN_URL`); `/login` sayfasının kendisi arayüz işi | link, token'ı POST eden bir sayfayı açmalı |
-| 2 | ✅ 2026-10-12: havuz ve eşleşme öğelerinde `offer_id` var | `POST /v1/swaps` teklif id'si istiyor |
-| 3 | ✅ 2026-10-12: `GET /v1/me/offers?status=` | alan kişi hangi quest'ini vereceğini seçer |
-| 4 | CORS katmanı yok | başka bir origin'deki arayüz API'yi cookie ile çağıramaz; arayüzü bu binary'den sun ya da credentials'lı CORS ekle |
-
-2026-10-12'de ayrıca yapıldı: ses yükleme tarayıcı kayıtlarını kabul ediyor (ogg, webm, m4a). Hâlâ açık: ana sayfa `/v1/match`'e `user_id` olmadan link veriyor (400 döner), ses süresi denetlenmiyor.
-
-Bitti tanımı: tanımadığın biri tarayıcıdan bırakır, giriş yapar, eşleşir, takas eder ve canlandırır.
+Bitti tanımı: tanımadığın biri tarayıcıdan bırakır, giriş yapar, eşleşir, takas eder ve canlandırır: ✅ (E2E kapsıyor).
 
 ## Faz 6 — Deploy (açık)
 
@@ -88,7 +73,7 @@ Bitti tanımı: tanımadığın biri tarayıcıdan bırakır, giriş yapar, eşl
 
 ## Faz 7 — Sağlamlaştırma (sonra)
 
-[design.tr.md §6](./design.tr.md#6-hata--moderasyon) içindeki bilinen sınırlardan: `/v1/match` ve `/v1/revive`'ı login'e bağla, bırakmada login kararını ver, birden çok instance için ortak rate limiter, ses süresi denetimi, `swap.created` adını `drop.created` yap, `time_bucket`/`energy`'yi skora kat.
+[design.tr.md §6](./design.tr.md#6-hata--moderasyon) içindeki bilinen sınırlardan: birden çok instance için ortak rate limiter, sunucu tarafında ses süresi denetimi (kaydedici 10-60 sn'yi uygular), `swap.created` adını `drop.created` yap, `time_bucket`/`energy`'yi skora kat.
 
 ## Geçmiş
 

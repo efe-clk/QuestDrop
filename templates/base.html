@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="{{ c.lang_code() }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}QuestDrop{% endblock %}</title>
+<meta name="description" content="{{ c.t("meta.site_tagline") }}">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f3f4ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"historyCacheSize":0,"allowEval":false,"allowScriptTags":false,"scrollIntoViewOnBoost":false,"defaultSettleDelay":0,"attributesToSettle":["class","width","height"]}'>
+{% block head %}{% endblock %}
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css?v=3">
+<script src="/static/vendor/htmx-2.0.10.min.js" defer></script>
+<script src="/static/app.js?v=3" defer></script>
+<script src="/static/recorder.js?v=3" defer></script>
+</head>
+<body hx-boost="true">
+<a class="skip" href="#main">{{ c.t("nav.skip") }}</a>
+{% include "partials/icons.html" %}
+<header class="top">
+  <div class="top__in">
+    <a class="brand" href="/" aria-label="QuestDrop">
+      <svg class="brand__mark" aria-hidden="true"><use href="#i-logo"></use></svg>
+      <span class="brand__word">QuestDrop</span>
+    </a>
+    <nav class="nav" aria-label="{{ c.t("nav.main") }}">
+      <a class="nav__a" href="/"{% if c.is("pool") %} aria-current="page"{% endif %}>
+        <svg class="ic" aria-hidden="true"><use href="#i-pool"></use></svg><span>{{ c.t("nav.pool") }}</span></a>
+      <a class="nav__a" href="/drop"{% if c.is("drop") %} aria-current="page"{% endif %}>
+        <svg class="ic" aria-hidden="true"><use href="#i-drop"></use></svg><span>{{ c.t("nav.drop") }}</span></a>
+      <a class="nav__a" href="/match"{% if c.is("match") %} aria-current="page"{% endif %}>
+        <svg class="ic" aria-hidden="true"><use href="#i-match"></use></svg><span>{{ c.t("nav.match") }}</span></a>
+      <a class="nav__a" href="/revive"{% if c.is("quests") %} aria-current="page"{% endif %}>
+        <svg class="ic" aria-hidden="true"><use href="#i-quests"></use></svg><span>{{ c.t("nav.quests") }}</span></a>
+    </nav>
+    <div class="top__end">
+      <a class="lang" href="{{ c.lang_href() }}" hx-boost="false" hreflang="{{ c.other_lang() }}" lang="{{ c.other_lang() }}">{{ c.t("meta.switch_to") }}</a>
+      {% if c.logged_in() %}
+      <a class="who" href="/me" title="{{ c.t("nav.profile") }}"{% if c.is("me") %} aria-current="page"{% endif %}>@{{ c.handle() }}</a>
+      {% else %}
+      <a class="btn btn--ghost btn--sm" href="{{ c.login_href() }}"{% if c.is("login") %} aria-current="page"{% endif %}>{{ c.t("nav.login") }}</a>
+      {% endif %}
+    </div>
+  </div>
+</header>
+{% if c.db_down %}
+<div class="band" role="status"><div class="wrap">{{ c.t("common.db_down") }}</div></div>
+{% endif %}
+<main id="main" class="wrap main" tabindex="-1">
+{% block main %}{% endblock %}
+</main>
+<footer class="foot"><div class="wrap">{{ c.t("meta.site_tagline") }}</div></footer>
+</body>
+</html>

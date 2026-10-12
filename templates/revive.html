@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("revive.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<h1 class="page__h">{{ c.t("revive.title") }}</h1>
+
+<nav class="tabs" aria-label="{{ c.t("revive.tabs") }}">
+  <a class="tabs__a" href="/revive"{% if tab == "taken" %} aria-current="page"{% endif %}>{{ c.t("revive.tab_taken") }}</a>
+  <a class="tabs__a" href="/revive?tab=given"{% if tab == "given" %} aria-current="page"{% endif %}>{{ c.t("revive.tab_given") }}</a>
+</nav>
+
+{% if tab == "taken" %}
+  {% if swapped %}
+  <div class="celebrate" role="status">
+    <span class="burst" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    <p class="celebrate__h">{{ c.t("revive.swapped_title") }}</p>
+    <p>{{ c.t("revive.swapped_body") }}</p>
+  </div>
+  {% endif %}
+
+  {% if revives.is_empty() %}
+  <div class="empty">
+    <p class="empty__h">{{ c.t("revive.empty_title") }}</p>
+    <p>{{ c.t("revive.empty_body") }}</p>
+    <a class="btn btn--primary" href="/match">{{ c.t("common.see_matches") }}</a>
+  </div>
+  {% else %}
+  <div class="revives">
+    {% for r in revives %}
+    <details class="revive" id="m-{{ r.match_id }}"{% if r.open %} open{% endif %}>
+      <summary class="revive__s">
+        <span class="revive__t">{{ r.card.title }}</span>
+        <span class="revive__d">{{ r.taken_on }}</span>
+      </summary>
+      <div class="revive__grid">
+        {% let q = r.card.clone() %}{% include "partials/card.html" %}
+        <section class="first" aria-labelledby="ft-{{ r.match_id }}" data-revive="questdrop:revive:{{ r.match_id }}">
+          <h3 class="first__h" id="ft-{{ r.match_id }}">{{ c.t("revive.first_title") }}</h3>
+          <ol class="steps">
+            {% for st in r.steps %}
+            <li class="step">
+              <label class="step__l">
+                <input type="checkbox" name="step{{ loop.index }}" data-step="{{ loop.index }}">
+                <span class="step__box" aria-hidden="true"><svg class="ic ic--sm"><use href="#i-check"></use></svg></span>
+                <span class="step__t">{{ st }}</span>
+              </label>
+            </li>
+            {% endfor %}
+          </ol>
+          <div class="timer" data-timer="120" data-timer-left="{{ c.t("revive.timer_left") }}" data-timer-done="{{ c.t("revive.timer_done") }}">
+            <button class="btn btn--secondary" type="button" data-timer-start>{{ c.t("revive.start_timer") }}</button>
+            <progress class="timer__bar" max="120" value="0" data-timer-bar hidden></progress>
+            <p class="timer__out" data-timer-out aria-live="polite"></p>
+          </div>
+        </section>
+      </div>
+    </details>
+    {% endfor %}
+  </div>
+  {% endif %}
+{% else %}
+  {% if given.is_empty() %}
+  <div class="empty">
+    <p class="empty__h">{{ c.t("revive.given_empty_title") }}</p>
+    <p>{{ c.t("revive.given_empty_body") }}</p>
+    <a class="btn btn--primary" href="/drop">{{ c.t("pool.drop_cta") }}</a>
+  </div>
+  {% else %}
+  <ul class="given">
+    {% for g in given %}
+    <li class="given__item">
+      <span class="status status--{{ g.status }}">{{ g.status_label }}</span>
+      {% let q = g.card.clone() %}{% include "partials/card.html" %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -10,13 +10,14 @@ Başarı kriteri: tanımadığın insanların açık havuzda takas yapması.
 
 | Parça | Durum |
 |---|---|
-| REST API (`/v1/`), Postgres şeması, auth, ses yükleme | Bitti, 50 test yeşil (19 birim + 31 entegrasyon) |
+| REST API (`/v1/`), Postgres şeması, auth, ses yükleme | Bitti |
 | B: outbox publisher + `bot` binary (log / Discord webhook) | Bitti |
 | C: `EmbeddingMatcher` (yerel trigram + kosinüs, `?algo=embedding`) | Bitti |
-| Web arayüzü (Askama + HTMX) | **Yapılmadı.** Sadece yer tutucu bir ana sayfa var. |
+| Web arayüzü (Askama + HTMX, Türkçe + İngilizce) | Bitti: havuz, giriş, tarayıcıdan ses kaydıyla bırakma, eşleşme, takas, canlandırma, profil, şikâyet |
+| Testler | 64 Rust testi yeşil (25 birim + 31 API + 8 web) ve Playwright tarayıcı E2E'si |
 | Deploy | **Yayında değil.** `Dockerfile` ve `fly.toml` hazır. |
 
-API artık arayüzün tüm döngüsünü karşılıyor (teklif id'leri, `/v1/me/offers`, tarayıcı ses biçimleri, ayarlanabilir login linki). `/login` sayfasının kendisi arayüze ait; bkz. [docs/plan.tr.md](./docs/plan.tr.md#faz-5--web-arayüzü-açık).
+Web arayüzü [docs/web-ui.tr.md](./docs/web-ui.tr.md)'yi izler; her sayfa JavaScript olmadan çalışır, HTMX sadece hızlandırır.
 
 ## Kapsam (MVP = A)
 
@@ -48,15 +49,17 @@ Login, geçerli bir `qd_session` cookie'si demek. `auth/callback` ve `auth/logou
 
 | Metod | Yol | Login | Not |
 |---|---|---|---|
-| GET | `/` | – | açık havuz sayısını gösteren yer tutucu HTML ana sayfa |
+| GET | `/`, `/login`, `/q/{id}` | – | web arayüzü sayfaları (HTML) |
+| GET | `/drop`, `/match`, `/take/{offer_id}`, `/revive`, `/me` | ✔ | web arayüzü sayfaları (HTML; oturumsuz → `/login?next=…`) |
 | GET | `/health` | – | her zaman 200, `{"status":"ok","db":"up"\|"down"}` |
 | GET | `/ready` | – | DB cevap verirse 200, yoksa 503 |
 | GET | `/v1/projects?cursor=&limit=` | – | OPEN havuz, yeniden eskiye, cursor sayfalı (varsayılan 20, max 50); öğelerde `offer_id` var |
-| POST | `/v1/projects` | – | quest bırak; `handle` + `email` gövdede gider; herhangi bir 24 saatte bırakan başına max 3 |
+| GET | `/v1/projects/{id}` | – | tek proje (OPEN ya da MATCHED) |
+| POST | `/v1/projects` | ✔ | oturumdaki kullanıcı olarak quest bırak; herhangi bir 24 saatte bırakan başına max 3 |
 | POST | `/v1/users/upsert` | ✔ | kendi yetenek profilin (`can_do`, `looking_for`) |
-| GET | `/v1/match?user_id=&algo=` | – | `offer_id`'li top-3 + 1 sürpriz; `algo=rule` (varsayılan) veya `embedding` |
+| GET | `/v1/match?algo=` | ✔ | oturumdaki kullanıcı için top-3 + 1 sürpriz, `offer_id` ile; `algo=rule` (varsayılan) veya `embedding` |
 | POST | `/v1/swaps` | ✔ | iki teklifin atomik, iki yönlü takası; `Idempotency-Key` opsiyonel |
-| GET | `/v1/revive?user_id=` | – | tamamlanan her alma, freeze paketi + ilk 2 dakika göreviyle |
+| GET | `/v1/revive` | ✔ | tamamladığın almalar, freeze paketi + ilk 2 dakika göreviyle |
 | POST | `/v1/reports` | ✔ | farklı kullanıcılardan gelen 3 report projeyi kapatır |
 | POST | `/v1/auth/request` | – | login linki e-postalar (15 dk tek kullanımlık token) |
 | POST | `/v1/auth/callback` | – | token'ı kullanır, oturum cookie'sini kurar (30 gün) |
@@ -64,7 +67,7 @@ Login, geçerli bir `qd_session` cookie'si demek. `auth/callback` ve `auth/logou
 | GET | `/v1/me` | ✔ | oturum kimliği |
 | GET | `/v1/me/offers?status=` | ✔ | kendi tekliflerin (takasta ne vereceğini seçmek için); `status` = open, matched ya da closed |
 | POST | `/v1/voice` | ✔ | ses yükleme: mp3, ogg, webm ya da m4a (multipart alanı `file`, 5 MB sınır) |
-| GET | `/voice/*` | – | kayıtlı mp3 dosyaları |
+| GET | `/voice/*` | – | kayıtlı ses dosyaları |
 
 Hatalar RFC 9457 problem JSON'u. Bilinmeyen yol JSON 404, yanlış metod JSON 405 döner; sondaki `/` 308 ile yönlenir.
 
@@ -77,7 +80,7 @@ cargo run              # migration'lar açılışta otomatik koşar
 
 `http://localhost:3000` aç; `/health` DB durumunu gösterir. Veritabanı yoksa sunucu yine açılır: havuz boş görünür, yazmalar 503 döner.
 
-`SMTP_URL` yoksa login linki gelen kutusu yerine loga yazılır (`RUST_LOG=questdrop=info` ile görünür).
+`SMTP_URL` yoksa login linki gelen kutusu yerine sunucu loguna yazılır (warn seviyesinde, varsayılan filtreyle görünür).
 
 Bot (outbox iletimi): `cargo run --bin bot`.
 
@@ -89,13 +92,16 @@ TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/questdrop_test" cargo t
 
 Entegrasyon testleri her tabloyu `TRUNCATE` eder. Veritabanı adresinde `test` geçmiyorsa çalışmayı reddeder.
 
+Tarayıcı E2E'si (Playwright, çalışan bir sunucu ve temiz bir veritabanı ister): bkz. [e2e/README.md](./e2e/README.md).
+
 ## Yapılandırma
 
 | Değişken | Varsayılan | Anlamı |
 |---|---|---|
 | `DATABASE_URL` | – | Postgres adresi; yoksa degrade mod |
 | `PORT` | `3000` | dinleme portu |
-| `VOICE_DIR` | `./data/voice` | mp3 klasörü |
+| `VOICE_DIR` | `./data/voice` | ses notu klasörü |
+| `STATIC_DIR` | `./static` | web arayüzünün CSS/JS/HTMX dosyaları |
 | `VOICE_QUOTA_MB` | `500` | klasör bu boyuta ulaşınca yükleme reddedilir (507) |
 | `SESSION_SECRET` | her açılışta rastgele | en az 16 karakter; production'da şart, yoksa yeniden başlatınca oturumlar düşer |
 | `BASE_URL` | `http://localhost:3000` | login linklerinin tabanı; `https://` ise cookie'ye `Secure` eklenir |

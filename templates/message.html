@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="narrow notice-page">
+  <h1 class="page__h">{{ heading }}</h1>
+  <p class="lead">{{ body }}</p>
+  <a class="btn btn--primary" href="{{ href }}">{{ label }}</a>
+</section>
+{% endblock %}

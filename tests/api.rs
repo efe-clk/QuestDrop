@@ -65,17 +65,34 @@ fn drop_json(handle: &str, email: &str, title: &str) -> serde_json::Value {
     })
 }
 
-async fn post_drop(app: &axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+/// Drops need a session: logs in as the body's email (+handle hint) first.
+async fn post_drop(
+    app: &axum::Router,
+    pool: &PgPool,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let ck = match body["email"].as_str() {
+        Some(email) => Some(login(app, pool, email, body["handle"].as_str()).await),
+        None => None,
+    };
+    post_drop_ck(app, ck.as_deref(), body).await
+}
+
+async fn post_drop_ck(
+    app: &axum::Router,
+    cookie: Option<&str>,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/v1/projects")
+        .header("content-type", "application/json");
+    if let Some(c) = cookie {
+        req = req.header("cookie", format!("qd_session={c}"));
+    }
     let res = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/projects")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let status = res.status();
@@ -91,8 +108,12 @@ async fn drop_201_freezes_offer_and_outbox() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (status, json) =
-        post_drop(&app, drop_json("alice_1", "alice1@x.com", "Photo renamer")).await;
+    let (status, json) = post_drop(
+        &app,
+        &pool,
+        drop_json("alice_1", "alice1@x.com", "Photo renamer"),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED, "body: {json}");
     assert!(json.get("project_id").is_some());
     assert!(json.get("offer_id").is_some());
@@ -128,13 +149,13 @@ async fn invalid_drop_400_with_errors() {
     let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
-    let app = build_app(Some(pool));
+    let app = build_app(Some(pool.clone()));
 
-    let (status, json) = post_drop(
-        &app,
-        serde_json::json!({"handle": "AB", "email": "nope", "title": "x"}),
-    )
-    .await;
+    // No session -> 401 before any validation.
+    let (status, _) = post_drop_ck(&app, None, serde_json::json!({"title": "x"})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let ck = login(&app, &pool, "inv@x.com", Some("inv_user")).await;
+    let (status, json) = post_drop_ck(&app, Some(&ck), serde_json::json!({"title": "x"})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(json["errors"].as_array().unwrap().len() >= 4);
 }
@@ -145,30 +166,43 @@ async fn fourth_drop_per_day_429() {
     let pool = test_pool().await;
     clean(&pool).await;
     // Fresh app per request would reset the IP limiter; one app for all 4 posts.
-    let app = build_app(Some(pool));
+    let app = build_app(Some(pool.clone()));
     for i in 1..=3 {
         let (s, _) = post_drop(
             &app,
+            &pool,
             drop_json("bob_4", "bob4@x.com", &format!("Project {i}")),
         )
         .await;
         assert_eq!(s, StatusCode::CREATED);
     }
-    let (s, _) = post_drop(&app, drop_json("bob_4", "bob4@x.com", "Project 4")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("bob_4", "bob4@x.com", "Project 4")).await;
     assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn email_handle_mismatch_409() {
+async fn drop_identity_mismatch_403() {
     let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
-    let app = build_app(Some(pool));
-    let (s, _) = post_drop(&app, drop_json("carol_5", "carol5@x.com", "First")).await;
+    let app = build_app(Some(pool.clone()));
+    let (s, _) = post_drop(&app, &pool, drop_json("carol_5", "carol5@x.com", "First")).await;
     assert_eq!(s, StatusCode::CREATED);
-    // Same email, different handle -> identity conflict, no silent takeover.
-    let (s, _) = post_drop(&app, drop_json("mallory_5", "carol5@x.com", "Hijack")).await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    // Carol's session naming another handle -> refused, no silent takeover.
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("mallory_5", "carol5@x.com", "Hijack"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // Identity may be omitted: the session fills it in.
+    let ck = login(&app, &pool, "carol5@x.com", None).await;
+    let mut body = drop_json("carol_5", "carol5@x.com", "Second");
+    body.as_object_mut().unwrap().remove("handle");
+    body.as_object_mut().unwrap().remove("email");
+    let (s, j) = post_drop_ck(&app, Some(&ck), body).await;
+    assert_eq!(s, StatusCode::CREATED, "body: {j}");
 }
 
 #[tokio::test]
@@ -176,10 +210,11 @@ async fn pool_paginates_with_cursor() {
     let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
-    let app = build_app(Some(pool));
+    let app = build_app(Some(pool.clone()));
     for i in 1..=3 {
         let (s, _) = post_drop(
             &app,
+            &pool,
             drop_json("dave_6", "dave6@x.com", &format!("Item {i}")),
         )
         .await;
@@ -238,40 +273,75 @@ async fn match_returns_ranked_excluding_own() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (s, _) = post_drop(&app, drop_json("matcher_a", "matcha@x.com", "Rust CLI")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_a", "matcha@x.com", "Rust CLI"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, _) = post_drop(&app, drop_json("matcher_a", "matcha@x.com", "Rust bot")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_a", "matcha@x.com", "Rust bot"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, _) = post_drop(&app, drop_json("matcher_b", "matchb@x.com", "Go tool")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("matcher_b", "matchb@x.com", "Go tool"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
 
     let uid: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='matcher_b'")
         .fetch_one(&pool)
         .await
         .unwrap();
+    let ck_b = login(&app, &pool, "matchb@x.com", None).await;
 
+    for uri in [format!("/v1/match?user_id={uid}"), "/v1/match".to_string()] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("cookie", format!("qd_session={ck_b}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = json["matches"].as_array().unwrap();
+        // Only A's two projects (own excluded), scores in range, swappable.
+        assert_eq!(items.len(), 2);
+        for m in items {
+            let s = m["score"].as_f64().unwrap();
+            assert!((0.0..=1.0).contains(&s));
+            assert!(m["offer_id"].is_string(), "match carries offer_id: {m}");
+        }
+    }
+
+    // Someone else's user_id with a session -> 403.
+    let ck_a = login(&app, &pool, "matcha@x.com", None).await;
     let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/match?user_id={uid}"))
+                .header("cookie", format!("qd_session={ck_a}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let items = json["matches"].as_array().unwrap();
-    // Only A's two projects (own excluded), scores in range.
-    assert_eq!(items.len(), 2);
-    for m in items {
-        let s = m["score"].as_f64().unwrap();
-        assert!((0.0..=1.0).contains(&s));
-    }
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
-    // Unknown user -> 404, garbage uuid -> 400, missing param -> 400.
+    // No session -> 401 (matches leak skill profiles), garbage uuid -> 400.
     for uri in [
         "/v1/match?user_id=00000000-0000-0000-0000-000000000000".to_string(),
         "/v1/match?user_id=nope".to_string(),
@@ -321,7 +391,12 @@ async fn profile_upsert_drives_match_fit() {
         .unwrap()
         .to_string();
 
-    let (s, _) = post_drop(&app, drop_json("fitter_a", "fita@x.com", "Rust quest")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("fitter_a", "fita@x.com", "Rust quest"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
 
     let res = app
@@ -329,6 +404,7 @@ async fn profile_upsert_drives_match_fit() {
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/match?user_id={uid}"))
+                .header("cookie", format!("qd_session={ck_b}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -386,19 +462,22 @@ async fn profile_upsert_drives_match_fit() {
 
 #[tokio::test]
 async fn concurrent_drops_hold_cap_without_5xx() {
-    // 10 parallel first-drops, one identity: exactly 3 win (201), the rest
-    // get 429 — and no 503 from aborted-transaction retries.
+    // 10 parallel drops, one identity: exactly 3 win (201), the rest get
+    // 429 — the user-row lock holds the cap, no 5xx.
     let _g = lock().await;
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "racer@x.com", Some("racer")).await;
 
     let mut tasks = Vec::new();
     for i in 0..10 {
         let app = app.clone();
+        let ck = ck.clone();
         tasks.push(tokio::spawn(async move {
-            post_drop(
+            post_drop_ck(
                 &app,
+                Some(&ck),
                 drop_json("racer", "racer@x.com", &format!("Race {i}")),
             )
             .await
@@ -495,6 +574,7 @@ fn swap_json(taker: &str, give: &str, take: &str) -> serde_json::Value {
 async fn seed_swap_pair(app: &axum::Router, pool: &PgPool, tag: &str) -> (String, String, String) {
     let (s, _) = post_drop(
         app,
+        pool,
         drop_json(
             &format!("sw_a_{tag}"),
             &format!("swa{tag}@x.com"),
@@ -505,6 +585,7 @@ async fn seed_swap_pair(app: &axum::Router, pool: &PgPool, tag: &str) -> (String
     assert_eq!(s, StatusCode::CREATED);
     let (s, _) = post_drop(
         app,
+        pool,
         drop_json(
             &format!("sw_b_{tag}"),
             &format!("swb{tag}@x.com"),
@@ -584,7 +665,7 @@ async fn swap_double_claim_409() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     // Same take again with a fresh giver -> taken already.
-    let (s, _) = post_drop(&app, drop_json("sw_c_s2", "swcs2@x.com", "C quest")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("sw_c_s2", "swcs2@x.com", "C quest")).await;
     assert_eq!(s, StatusCode::CREATED);
     let uid_c: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='sw_c_s2'")
         .fetch_one(&pool)
@@ -722,7 +803,7 @@ async fn swap_race_single_winner() {
     for i in 0..5 {
         let h = format!("racer_s5_{i}");
         let em = format!("rs5{i}@x.com");
-        let (s, _) = post_drop(&app, drop_json(&h, &em, "Racer")).await;
+        let (s, _) = post_drop(&app, &pool, drop_json(&h, &em, "Racer")).await;
         assert_eq!(s, StatusCode::CREATED);
         let ck = login(&app, &pool, &em, None).await;
         let uid: String =
@@ -818,7 +899,12 @@ async fn third_report_hides_project() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (s, _) = post_drop(&app, drop_json("rep_a", "repa@x.com", "Flagged quest")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("rep_a", "repa@x.com", "Flagged quest"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     let project: String = sqlx::query_scalar(
         "SELECT p.id::text FROM projects p JOIN users u ON u.id=p.giver_id WHERE u.handle='rep_a'",
@@ -910,7 +996,7 @@ async fn revive_returns_package_and_task() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     // Same taker takes again: history keeps both revives, newest first.
-    let (s, _) = post_drop(&app, drop_json("sw_c_rv", "swcrv@x.com", "Second")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("sw_c_rv", "swcrv@x.com", "Second")).await;
     assert_eq!(s, StatusCode::CREATED);
     let offer_c: String = sqlx::query_scalar(
         "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_c_rv'",
@@ -918,7 +1004,12 @@ async fn revive_returns_package_and_task() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let (s, _) = post_drop(&app, drop_json("sw_b_rv", "swbrv@x.com", "B quest 2")).await;
+    let (s, _) = post_drop(
+        &app,
+        &pool,
+        drop_json("sw_b_rv", "swbrv@x.com", "B quest 2"),
+    )
+    .await;
     assert_eq!(s, StatusCode::CREATED);
     let offer_b2: String = sqlx::query_scalar(
         "SELECT o.id::text FROM swap_offers o JOIN projects p ON p.id=o.project_id WHERE p.title='B quest 2'",
@@ -940,6 +1031,7 @@ async fn revive_returns_package_and_task() {
         .oneshot(
             Request::builder()
                 .uri(format!("/v1/revive?user_id={uid_b}"))
+                .header("cookie", format!("qd_session={ck_b}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -958,7 +1050,7 @@ async fn revive_returns_package_and_task() {
         4
     );
 
-    // Giver with no takes + unknown user -> 404.
+    // Someone else's id with a session -> 403; no session -> 401.
     let uid_a: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='sw_a_rv'")
         .fetch_one(&pool)
         .await
@@ -985,7 +1077,7 @@ async fn swap_key_reuse_with_different_params_400() {
     let app = build_app(Some(pool.clone()));
     let (uid_b, offer_b, offer_a) = seed_swap_pair(&app, &pool, "s6").await;
     let ck_b = login(&app, &pool, "swbs6@x.com", None).await;
-    let (s, _) = post_drop(&app, drop_json("sw_c_s6", "swcs6@x.com", "C quest")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("sw_c_s6", "swcs6@x.com", "C quest")).await;
     assert_eq!(s, StatusCode::CREATED);
     let offer_c: String = sqlx::query_scalar(
         "SELECT o.id::text FROM swap_offers o JOIN users u ON u.id=o.giver_id WHERE u.handle='sw_c_s6'",
@@ -1102,7 +1194,7 @@ async fn publisher_delivers_then_idles() {
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
-    let (s, _) = post_drop(&app, drop_json("pub_a", "puba@x.com", "Pub quest")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("pub_a", "puba@x.com", "Pub quest")).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let sink = VecSink {
@@ -1139,7 +1231,7 @@ async fn publisher_keeps_failed_events() {
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
-    let (s, _) = post_drop(&app, drop_json("pub_b", "pubb@x.com", "Pub quest")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("pub_b", "pubb@x.com", "Pub quest")).await;
     assert_eq!(s, StatusCode::CREATED);
 
     let n = questdrop::publisher::run_once(&pool, &FailSink)
@@ -1159,18 +1251,26 @@ async fn match_embedding_algo_is_deterministic() {
     let pool = test_pool().await;
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
-    let (s, _) = post_drop(&app, drop_json("emb_a", "emba@x.com", "Rust quest")).await;
+    let (s, _) = post_drop(&app, &pool, drop_json("emb_a", "emba@x.com", "Rust quest")).await;
     assert_eq!(s, StatusCode::CREATED);
     let uid: String = sqlx::query_scalar("SELECT id::text FROM users WHERE handle='emb_a'")
         .fetch_one(&pool)
         .await
         .unwrap();
+    let ck = login(&app, &pool, "emba@x.com", None).await;
 
     let get = |uri: String| {
         let app = app.clone();
+        let ck = ck.clone();
         async move {
             let res = app
-                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .header("cookie", format!("qd_session={ck}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             (res.status(), {
@@ -1507,7 +1607,7 @@ async fn voice_quota_blocks_when_full() {
 #[tokio::test]
 async fn db_down_503() {
     let app = build_app(None);
-    let (status, _) = post_drop(&app, drop_json("erin_7", "erin7@x.com", "Nope")).await;
+    let (status, _) = post_drop_ck(&app, None, drop_json("erin_7", "erin7@x.com", "Nope")).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -1539,9 +1639,9 @@ async fn offer_ids_flow_from_pool_match_and_me_into_swap() {
     clean(&pool).await;
     let app = build_app(Some(pool.clone()));
 
-    let (s, a) = post_drop(&app, drop_json("offer_a", "offa@x.com", "Quest A")).await;
+    let (s, a) = post_drop(&app, &pool, drop_json("offer_a", "offa@x.com", "Quest A")).await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, b) = post_drop(&app, drop_json("offer_b", "offb@x.com", "Quest B")).await;
+    let (s, b) = post_drop(&app, &pool, drop_json("offer_b", "offb@x.com", "Quest B")).await;
     assert_eq!(s, StatusCode::CREATED);
     let (a_offer, b_offer) = (a["offer_id"].clone(), b["offer_id"].clone());
 
@@ -1577,7 +1677,10 @@ async fn offer_ids_flow_from_pool_match_and_me_into_swap() {
     let (s, me) = get_json(&app, "/v1/me", Some(&ck)).await;
     assert_eq!(s, StatusCode::OK);
     let b_uid = me["user_id"].as_str().unwrap().to_string();
-    let (s, m) = get_json(&app, &format!("/v1/match?user_id={b_uid}"), None).await;
+    // Match is login-bound (web-ui §10.7): the session decides whose matches.
+    let (s, _) = get_json(&app, &format!("/v1/match?user_id={b_uid}"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, m) = get_json(&app, &format!("/v1/match?user_id={b_uid}"), Some(&ck)).await;
     assert_eq!(s, StatusCode::OK);
     let matches = m["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1);
@@ -1652,6 +1755,6 @@ async fn voice_upload_accepts_browser_formats() {
     // A drop accepts the uploaded ogg as its voice note.
     let mut d = drop_json("fmt_u", "fmt@x.com", "Ogg quest");
     d["voice_url"] = serde_json::Value::String(urls[0].clone());
-    let (s, j) = post_drop(&app, d).await;
+    let (s, j) = post_drop(&app, &pool, d).await;
     assert_eq!(s, StatusCode::CREATED, "body: {j}");
 }

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ og_title }} – QuestDrop{% endblock %}
+{% block head %}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="QuestDrop">
+<meta property="og:title" content="{{ og_title }}">
+<meta property="og:description" content="{{ og_desc }}">
+<meta property="og:url" content="{{ og_url }}">
+<meta name="twitter:card" content="summary">
+<link rel="canonical" href="{{ og_url }}">
+{% endblock %}
+{% block main %}
+<section class="narrow narrow--wide">
+  {% if dropped %}
+  <div class="celebrate celebrate--quiet" role="status" data-clear-draft="questdrop:drop-draft">
+    <p class="celebrate__h">{{ c.t("drop.done_title") }}</p>
+    <p>{{ c.t("drop.done_body") }}</p>
+    <a class="btn btn--primary" href="/match">{{ c.t("common.see_matches") }}</a>
+  </div>
+  {% endif %}
+  {% if state == "moved" %}
+  <div class="alert alert--calm" role="status">
+    <p class="alert__h">{{ c.t("quest.moved_title") }}</p>
+    <p>{{ c.t("quest.moved_body") }}</p>
+    <a class="btn btn--secondary btn--sm" href="/">{{ c.t("common.back_to_pool") }}</a>
+  </div>
+  {% endif %}
+  {% if let Some(q) = card %}{% include "partials/card.html" %}{% endif %}
+</section>
+{% endblock %}

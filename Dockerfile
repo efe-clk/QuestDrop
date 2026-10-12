@@ -4,6 +4,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY migrations ./migrations
+COPY i18n ./i18n
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/* \
   && cargo build --locked --release
 
@@ -12,7 +13,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
   && useradd -r -u 10001 appuser
 COPY --from=build /app/target/release/questdrop ./questdrop
-# NOTE: templates/ is compiled into the binary by Askama at build time.
+COPY static ./static
+# NOTE: templates/ and i18n/ are compiled into the binary at build time;
+# static/ (CSS, JS, vendored HTMX) is served from disk.
 RUN mkdir -p ./data/voice && chown -R appuser:appuser /app
 USER appuser
 ENV PORT=3000 VOICE_DIR=./data/voice

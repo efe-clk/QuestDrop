@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("drop.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="narrow">
+  <h1 class="page__h">{{ c.t("drop.title") }}</h1>
+  <p class="lead">{{ c.t("drop.intro") }}</p>
+
+  {% if let Some(cap) = cap %}
+  <div class="alert alert--calm" role="status">
+    <p data-countdown="{{ cap_secs }}">{{ cap }}</p>
+  </div>
+  {% endif %}
+
+  {% if !summary.is_empty() %}
+  <div class="alert" role="alert" tabindex="-1" data-autofocus>
+    <p class="alert__h">{{ c.t("drop.summary") }}</p>
+    <ul>{% for m in summary %}<li>{{ m }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <form class="form" id="drop-form" method="post" action="/drop" enctype="multipart/form-data" data-draft="questdrop:drop-draft" hx-disabled-elt="find button[type=submit]" novalidate>
+    <input type="hidden" name="next" value="{{ next }}">
+
+    <div class="field{% if e_title.is_some() %} field--err{% endif %}">
+      <label class="label" for="f-title">{{ c.t("drop.f_title") }}</label>
+      <input class="input" id="f-title" name="title" type="text" required minlength="3" maxlength="80" value="{{ title }}" aria-describedby="f-title-h"{% if e_title.is_some() %} aria-invalid="true"{% endif %}>
+      <p class="help" id="f-title-h">{{ c.t("drop.f_title_help") }}</p>
+      {% if let Some(e) = e_title %}<p class="err">{{ e }}</p>{% endif %}
+    </div>
+
+    <div class="field{% if e_one_liner.is_some() %} field--err{% endif %}">
+      <label class="label" for="f-one">{{ c.t("drop.f_one_liner") }}</label>
+      <input class="input" id="f-one" name="one_liner" type="text" required minlength="10" maxlength="200" value="{{ one_liner }}" aria-describedby="f-one-h"{% if e_one_liner.is_some() %} aria-invalid="true"{% endif %}>
+      <p class="help" id="f-one-h">{{ c.t("drop.f_one_liner_help") }}</p>
+      {% if let Some(e) = e_one_liner %}<p class="err">{{ e }}</p>{% endif %}
+    </div>
+
+    <div class="field{% if e_link.is_some() %} field--err{% endif %}">
+      <label class="label" for="f-link">{{ c.t("drop.f_link") }}</label>
+      <input class="input" id="f-link" name="link_url" type="url" inputmode="url" required maxlength="2048" placeholder="https://" value="{{ link_url }}" aria-describedby="f-link-h"{% if e_link.is_some() %} aria-invalid="true"{% endif %}>
+      <p class="help" id="f-link-h">{{ c.t("drop.f_link_help") }}</p>
+      {% if let Some(e) = e_link %}<p class="err">{{ e }}</p>{% endif %}
+    </div>
+
+    <fieldset class="field rec{% if e_voice.is_some() %} field--err{% endif %}" data-recorder
+      data-msg-too-short="{{ c.t("rec.too_short") }}"
+      data-msg-recording="{{ c.t("rec.recording") }}"
+      data-msg-uploading="{{ c.t("rec.uploading") }}"
+      data-msg-ready="{{ c.t("rec.ready") }}"
+      data-msg-no-mic="{{ c.t("rec.no_mic") }}"
+      data-msg-unsupported="{{ c.t("rec.unsupported") }}"
+      data-msg-too-big="{{ c.t("rec.too_big") }}"
+      data-msg-full="{{ c.t("rec.full") }}"
+      data-msg-bad-type="{{ c.t("rec.bad_type") }}"
+      data-msg-need-login="{{ c.t("rec.need_login") }}"
+      data-msg-failed="{{ c.t("rec.failed") }}"
+      data-msg-wait="{{ c.t("rec.wait") }}"
+      data-msg-duration="{{ c.t("rec.duration") }}"
+      data-msg-record="{{ c.t("rec.record") }}"
+      data-msg-stop="{{ c.t("rec.stop") }}">
+      <legend class="label">{{ c.t("drop.f_voice") }}</legend>
+      <p class="help">{{ c.t("drop.f_voice_help") }}</p>
+      <input type="hidden" name="voice_url" value="{{ voice_url }}" data-rec-url>
+
+      <div class="rec__done" data-rec-done{% if voice_url.is_empty() %} hidden{% endif %}>
+        <svg class="ic" aria-hidden="true"><use href="#i-check"></use></svg>
+        <span>{{ c.t("rec.ready") }}</span>
+        <audio controls preload="none" data-rec-final{% if !voice_url.is_empty() %} src="{{ voice_url }}"{% endif %}></audio>
+        <button class="btn btn--quiet btn--sm" type="button" data-rec-replace>{{ c.t("rec.replace") }}</button>
+      </div>
+
+      <div class="rec__live" data-rec-live hidden>
+        <button class="rec__btn" type="button" data-rec-toggle aria-pressed="false">
+          <svg class="ic ic--lg" aria-hidden="true"><use href="#i-mic" data-rec-icon></use></svg>
+          <span data-rec-label>{{ c.t("rec.record") }}</span>
+        </button>
+        <div class="rec__meter">
+          <span class="rec__time" data-rec-time>0:00</span>
+          <span class="meter" role="img" aria-label="{{ c.t("rec.level") }}"><span class="meter__bar" data-rec-level></span></span>
+          <span class="help">{{ c.t("rec.limit") }}</span>
+        </div>
+        <div class="rec__review" data-rec-review hidden>
+          <audio controls data-rec-preview></audio>
+          <div class="rec__actions">
+            <button class="btn btn--quiet btn--sm" type="button" data-rec-again>{{ c.t("rec.rerecord") }}</button>
+            <button class="btn btn--primary btn--sm" type="button" data-rec-use>{{ c.t("rec.use") }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rec__file" data-rec-file{% if !voice_url.is_empty() %} hidden{% endif %}>
+        <label class="help rec__or" for="f-voice-file" data-rec-or hidden>{{ c.t("rec.or_upload") }}</label>
+        <label class="label label--sm" for="f-voice-file" data-rec-file-label>{{ c.t("rec.upload_label") }}</label>
+        <input class="file" id="f-voice-file" name="voice_file" type="file" accept="audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/mp4,audio/x-m4a,.mp3,.ogg,.webm,.m4a">
+      </div>
+      <progress class="rec__progress" max="100" value="0" data-rec-progress hidden></progress>
+      <p class="rec__status" data-rec-status role="status" aria-live="polite"></p>
+      {% if let Some(e) = e_voice %}<p class="err">{{ e }}</p>{% endif %}
+    </fieldset>
+
+    <div class="field{% if e_skills.is_some() %} field--err{% endif %}">
+      <label class="label" for="f-skills">{{ c.t("drop.f_skills") }}</label>
+      <input class="input" id="f-skills" name="skills" type="text" value="{{ skills }}" data-chips data-max="10" aria-describedby="f-skills-h" autocomplete="off" autocapitalize="none">
+      <p class="help" id="f-skills-h">{{ c.t("drop.f_skills_help") }}</p>
+      {% if let Some(e) = e_skills %}<p class="err">{{ e }}</p>{% endif %}
+    </div>
+
+    <fieldset class="field seg{% if e_time.is_some() %} field--err{% endif %}">
+      <legend class="label">{{ c.t("time.legend") }}</legend>
+      <div class="seg__row">
+        {% for o in time_opts %}
+        <label class="seg__opt">
+          <input type="radio" name="time_bucket" value="{{ o.value }}" required{% if o.checked %} checked{% endif %}>
+          <span class="seg__face">
+            <svg class="ic hg hg--{{ o.value }}" aria-hidden="true"><use href="#i-hourglass"></use></svg>
+            <span class="seg__k">{{ o.label }}</span>
+            <span class="seg__s">{{ o.help }}</span>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+      {% if let Some(e) = e_time %}<p class="err">{{ e }}</p>{% endif %}
+    </fieldset>
+
+    <fieldset class="field seg{% if e_energy.is_some() %} field--err{% endif %}">
+      <legend class="label">{{ c.t("energy.legend") }}</legend>
+      <div class="seg__row">
+        {% for o in energy_opts %}
+        <label class="seg__opt">
+          <input type="radio" name="energy" value="{{ o.value }}" required{% if o.checked %} checked{% endif %}>
+          <span class="seg__face">
+            <svg class="ic bat" aria-hidden="true"><use href="#i-bat-{{ o.level }}"></use></svg>
+            <span class="seg__k">{{ o.label }}</span>
+            <span class="seg__s">{{ o.help }}</span>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+      {% if let Some(e) = e_energy %}<p class="err">{{ e }}</p>{% endif %}
+    </fieldset>
+
+    <button class="btn btn--primary btn--lg btn--block" type="submit"{% if cap.is_some() || c.db_down %} disabled{% endif %}>{{ c.t("drop.submit") }}</button>
+  </form>
+</section>
+{% endblock %}

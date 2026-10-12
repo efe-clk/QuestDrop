@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("me.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="narrow">
+  <h1 class="page__h">{{ c.t("me.title") }}</h1>
+  <dl class="ident">
+    <div><dt>{{ c.t("me.handle") }}</dt><dd>@{{ handle }}</dd></div>
+    <div><dt>{{ c.t("me.email") }}</dt><dd>{{ email }}</dd></div>
+  </dl>
+
+  {% if saved %}<div class="alert alert--ok" role="status"><p>{{ c.t("common.saved") }}</p></div>{% endif %}
+  {% if let Some(e) = error %}<div class="alert" role="alert"><p>{{ e }}</p></div>{% endif %}
+
+  <form class="form" method="post" action="/me" hx-disabled-elt="find button[type=submit]">
+    <div class="field">
+      <label class="label" for="can_do">{{ c.t("me.can_do") }}</label>
+      <input class="input" id="can_do" name="can_do" type="text" value="{{ can_do }}" data-chips data-max="20" aria-describedby="can_do-h" autocomplete="off" autocapitalize="none">
+      <p class="help" id="can_do-h">{{ c.t("me.can_do_help") }}</p>
+    </div>
+    <div class="field">
+      <label class="label" for="looking_for">{{ c.t("me.looking_for") }}</label>
+      <input class="input" id="looking_for" name="looking_for" type="text" value="{{ looking_for }}" data-chips data-max="20" aria-describedby="looking_for-h" autocomplete="off" autocapitalize="none">
+      <p class="help" id="looking_for-h">{{ c.t("me.looking_for_help") }}</p>
+    </div>
+    <button class="btn btn--primary btn--lg" type="submit"{% if c.db_down %} disabled{% endif %}>{{ c.t("me.save") }}</button>
+  </form>
+
+  <section class="section" aria-labelledby="open-h">
+    <h2 class="section__h" id="open-h">{{ c.t("me.open_quests") }}</h2>
+    {% if open.is_empty() %}
+    <p class="muted">{{ c.t("me.open_empty") }}</p>
+    {% else %}
+    <div class="board board--single">
+      {% for q in open %}{% include "partials/card.html" %}{% endfor %}
+    </div>
+    {% endif %}
+  </section>
+
+  <form class="logout" method="post" action="/logout">
+    <button class="btn btn--quiet" type="submit">{{ c.t("login.logout") }}</button>
+  </form>
+</section>
+{% endblock %}

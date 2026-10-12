@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("match.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<div class="page__top">
+  <div>
+    <h1 class="page__h">{{ c.t("match.title") }}</h1>
+    <p class="lead">{{ c.t("match.intro") }}</p>
+  </div>
+  <a class="btn btn--secondary" href="/match"><svg class="ic" aria-hidden="true"><use href="#i-refresh"></use></svg>{{ c.t("match.refresh") }}</a>
+</div>
+
+{% if no_skills %}
+<div class="alert alert--calm">
+  <p>{{ c.t("match.no_skills") }}</p>
+  <a class="btn btn--secondary btn--sm" href="/me">{{ c.t("match.no_skills_cta") }}</a>
+</div>
+{% endif %}
+
+{% if cards.is_empty() %}
+<div class="empty">
+  <p class="empty__h">{{ c.t("match.empty_title") }}</p>
+  <p>{{ c.t("match.empty_body") }}</p>
+  <a class="btn btn--primary" href="/">{{ c.t("match.see_pool") }}</a>
+</div>
+{% else %}
+<div class="board board--match">
+  {% for q in cards %}{% include "partials/card.html" %}{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -306,7 +306,9 @@ pub struct LogMailer;
 #[async_trait::async_trait]
 impl Mailer for LogMailer {
     async fn send_login_link(&self, email: &str, link: &str) -> Result<(), String> {
-        tracing::info!(%email, link = %link, "login link (log mailer)");
+        // warn, not info: the default filter is warn and this link is the
+        // only way to log in on a dev box without SMTP.
+        tracing::warn!(%email, link = %link, "login link (log mailer)");
         Ok(())
     }
 }
@@ -376,6 +378,18 @@ pub fn login_link(token: &str) -> String {
         std::env::var("LOGIN_URL").ok().as_deref(),
         token,
     )
+}
+
+/// Login link that returns the user to `next` (a site-relative path the
+/// caller already validated) once the token is redeemed.
+pub fn login_link_next(token: &str, next: Option<&str>) -> String {
+    let mut link = login_link(token);
+    if let Some(n) = next {
+        let enc: String = url::form_urlencoded::byte_serialize(n.as_bytes()).collect();
+        link.push_str("&next=");
+        link.push_str(&enc);
+    }
+    link
 }
 
 fn build_login_link(base_url: Option<&str>, login_url: Option<&str>, token: &str) -> String {

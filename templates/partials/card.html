@@ -1,0 +1,64 @@
+<article class="card{% if q.surprise %} card--surprise{% endif %}{% if q.own %} card--own{% endif %}" id="card-{{ q.id }}" aria-labelledby="t-{{ q.id }}">
+  <div class="card__stub">
+    <span class="stub">
+      <svg class="ic hg hg--{{ q.tb }}" aria-hidden="true"><use href="#i-hourglass"></use></svg>
+      <span class="stub__k">{{ q.tb_label }}</span>
+      <span class="stub__s">{{ q.tb_help }}</span>
+    </span>
+    <span class="stub">
+      <svg class="ic bat" aria-hidden="true"><use href="#i-bat-{{ q.energy_level() }}"></use></svg>
+      <span class="stub__k" aria-hidden="true">{{ q.en_label }}</span>
+      <span class="sr">{{ q.en_long }}</span>
+    </span>
+  </div>
+  <div class="card__body">
+    <div class="card__head">
+      {% if q.surprise %}<span class="tag tag--surprise">{{ c.t("match.surprise") }}</span>{% endif %}
+      {% if q.h == 2 %}
+      <h2 class="card__title card__title--lg" id="t-{{ q.id }}">{{ q.title }}</h2>
+      {% else %}
+      <h3 class="card__title" id="t-{{ q.id }}">{{ q.title }}</h3>
+      {% endif %}
+      {% if q.report != "none" %}
+      <details class="menu">
+        <summary class="menu__btn" title="{{ c.t("report.menu") }}"><svg class="ic" aria-hidden="true"><use href="#i-more"></use></svg><span class="sr">{{ c.t("report.menu") }}</span></summary>
+        <div class="menu__panel" id="rep-{{ q.id }}" aria-live="polite">
+          {% if q.report == "login" %}
+          <a class="link" href="{{ c.login_href() }}">{{ c.t("report.login") }}</a>
+          {% else if q.report == "done" %}
+          <p class="muted">{{ c.t("report.already") }}</p>
+          {% else %}
+          <form class="report" method="post" action="/report/{{ q.id }}" hx-post="/report/{{ q.id }}" hx-target="#rep-{{ q.id }}" hx-swap="innerHTML" hx-disabled-elt="find button">
+            <input type="hidden" name="back" value="{{ c.here }}">
+            <label class="label" for="reason-{{ q.id }}">{{ c.t("report.reason") }}</label>
+            <textarea class="input" id="reason-{{ q.id }}" name="reason" rows="3" minlength="10" maxlength="300" required aria-describedby="reason-h-{{ q.id }}"></textarea>
+            <p class="help" id="reason-h-{{ q.id }}">{{ c.t("report.reason_help") }}</p>
+            <button class="btn btn--quiet btn--sm" type="submit">{{ c.t("report.send") }}</button>
+          </form>
+          {% endif %}
+        </div>
+      </details>
+      {% endif %}
+    </div>
+    {% if let Some(r) = q.reason %}<p class="card__reason{% if q.surprise %} card__reason--surprise{% endif %}">{{ r }}</p>{% endif %}
+    <p class="card__line">{{ q.one_liner }}</p>
+    {% if !q.skills.is_empty() %}
+    <ul class="chips" aria-label="{{ c.t("common.skills") }}">
+      {% for sk in q.skills %}<li class="chip">{{ sk }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    <div class="voice">
+      <audio class="voice__player" controls preload="none" src="{{ q.voice_url }}" aria-label="{{ c.t("common.voice_note") }}"></audio>
+      {% if q.voice_external %}<span class="tag tag--quiet">{{ c.t("common.external_voice") }}</span>{% endif %}
+    </div>
+    <div class="card__foot">
+      <span class="by">{{ c.tf("common.by", q.giver) }}</span>
+      <a class="link" href="{{ q.link_url }}" target="_blank" rel="noopener noreferrer nofollow ugc"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-link"></use></svg>{{ c.t("common.open_link") }}</a>
+      {% if q.can_take() %}
+      <a class="btn btn--primary card__cta" href="{{ q.take_href() }}">{{ c.t("common.take") }}</a>
+      {% else if q.own %}
+      <span class="tag tag--own card__cta">{{ c.t("common.yours") }}</span>
+      {% endif %}
+    </div>
+  </div>
+</article>

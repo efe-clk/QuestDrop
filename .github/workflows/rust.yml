@@ -14,9 +14,33 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    # Integration tests (tests/api.rs, tests/web.rs) need a real Postgres
+    # whose database name contains "test" (they TRUNCATE every table).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: qd
+          POSTGRES_PASSWORD: qd
+          POSTGRES_DB: questdrop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qd -d questdrop_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://qd:qd@localhost:5432/questdrop_test
+
     steps:
     - uses: actions/checkout@v4
+    - name: Format
+      run: cargo fmt --check
     - name: Build
       run: cargo build --verbose
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
     - name: Run tests
       run: cargo test --verbose

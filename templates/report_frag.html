@@ -1,0 +1,11 @@
+{% if let Some(m) = msg %}
+<p class="report__done" role="status"{% if hidden %} data-hide-card="card-{{ id }}"{% endif %}>{{ m }}</p>
+{% else %}
+<form class="report" method="post" action="/report/{{ id }}" hx-post="/report/{{ id }}" hx-target="#rep-{{ id }}" hx-swap="innerHTML" hx-disabled-elt="find button">
+  <input type="hidden" name="back" value="/">
+  <label class="label" for="reason-{{ id }}">{{ c.t("report.reason") }}</label>
+  <textarea class="input" id="reason-{{ id }}" name="reason" rows="3" minlength="10" maxlength="300" required aria-invalid="true" aria-describedby="reason-e-{{ id }}">{{ reason }}</textarea>
+  {% if let Some(e) = error %}<p class="err" id="reason-e-{{ id }}" role="alert">{{ e }}</p>{% endif %}
+  <button class="btn btn--quiet btn--sm" type="submit">{{ c.t("report.send") }}</button>
+</form>
+{% endif %}

@@ -20,10 +20,6 @@ pub enum DbError {
     NotFound(String),
     /// Malformed-but-parseable client error: caller maps to 400.
     BadRequest(String),
-    /// Internal: unique race lost mid-transaction — caller retries with a
-    /// FRESH transaction (a 23505 poisons the current one: Postgres aborts
-    /// it, so re-querying inside it always fails).
-    RetryTx,
     Db(sqlx::Error),
 }
 
@@ -51,124 +47,95 @@ pub struct PoolRow {
     pub created_at: DateTime<Utc>,
 }
 
-async fn find_or_create_user(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    handle: &str,
-    email: &str,
-) -> Result<Uuid, DbError> {
-    if let Some(row) = sqlx::query("SELECT id, handle FROM users WHERE email = $1")
-        .bind(email)
-        .fetch_optional(&mut **tx)
-        .await?
-    {
-        let id: Uuid = row.try_get("id")?;
-        let existing: String = row.try_get("handle")?;
-        if existing != handle {
-            return Err(DbError::Conflict(
-                "email is already registered with a different handle".into(),
-            ));
-        }
-        return Ok(id);
-    }
-    if sqlx::query("SELECT 1 FROM users WHERE handle = $1")
-        .bind(handle)
-        .fetch_optional(&mut **tx)
-        .await?
-        .is_some()
-    {
-        return Err(DbError::Conflict("handle is already taken".into()));
-    }
-    sqlx::query_scalar("INSERT INTO users (handle, email) VALUES ($1, $2) RETURNING id")
-        .bind(handle)
-        .bind(email)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| match &e {
-            // Lost an insert race with a concurrent first-drop. The current
-            // transaction is now aborted — signal for a fresh retry.
-            sqlx::Error::Database(d) if d.code().as_deref() == Some("23505") => DbError::RetryTx,
-            _ => DbError::Db(e),
-        })
-}
-
-/// Creates project + open offer + outbox event atomically.
-/// The user row is locked first so two concurrent drops cannot both
-/// pass the daily cap. Insert races retry with a FRESH transaction.
-pub async fn create_drop(pool: &PgPool, v: &ValidatedDrop) -> Result<(Uuid, Uuid), DbError> {
-    for _ in 0..3 {
-        let mut tx = pool.begin().await?;
-        let giver = match find_or_create_user(&mut tx, &v.handle, &v.email).await {
-            Ok(id) => id,
-            Err(DbError::RetryTx) => continue, // tx drops uncommitted = rollback
-            Err(e) => return Err(e),
-        };
-
-        sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
-            .bind(giver)
-            .fetch_one(&mut *tx)
-            .await?;
-        let today: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM projects WHERE giver_id = $1 AND created_at > now() - interval '1 day'",
-        )
+/// Creates project + open offer + outbox event atomically for a known
+/// (session) user. The user row is locked first so two concurrent drops
+/// cannot both pass the daily cap. Identity (handle/email) comes from the
+/// session, never from the request body.
+pub async fn create_drop_as(
+    pool: &PgPool,
+    giver: Uuid,
+    v: &ValidatedDrop,
+) -> Result<(Uuid, Uuid), DbError> {
+    let mut tx = pool.begin().await?;
+    if sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
         .bind(giver)
-        .fetch_one(&mut *tx)
-        .await?;
-        if today >= MAX_DROPS_PER_DAY {
-            // Rolling 24h window: retry when the oldest counted drop expires,
-            // so Retry-After matches the actual quota (not UTC midnight).
-            let oldest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        tx.rollback().await?;
+        return Err(DbError::NotFound("unknown user".into()));
+    }
+    let today: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM projects WHERE giver_id = $1 AND created_at > now() - interval '1 day'",
+    )
+    .bind(giver)
+    .fetch_one(&mut *tx)
+    .await?;
+    if today >= MAX_DROPS_PER_DAY {
+        // Rolling 24h window: retry when the oldest counted drop expires,
+        // so Retry-After matches the actual quota (not UTC midnight).
+        let oldest: Option<DateTime<Utc>> = sqlx::query_scalar(
             "SELECT MIN(created_at) FROM projects WHERE giver_id = $1 AND created_at > now() - interval '1 day'",
         )
         .bind(giver)
         .fetch_one(&mut *tx)
         .await?;
-            tx.rollback().await?;
-            let retry = oldest
-                .map(|t| (86_400 - (Utc::now() - t).num_seconds()).max(1) as u64)
-                .unwrap_or(3_600);
-            return Err(DbError::DailyCap(retry));
-        }
-
-        let project_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO projects (title, one_liner, link_url, voice_url, skill_needed, time_bucket, energy, giver_id)
-             VALUES ($1, $2, $3, $4, $5, $6::time_bucket, $7::energy, $8) RETURNING id",
-        )
-        .bind(&v.title)
-        .bind(&v.one_liner)
-        .bind(&v.link_url)
-        .bind(&v.voice_url)
-        .bind(&v.skill_needed)
-        .bind(&v.time_bucket)
-        .bind(&v.energy)
-        .bind(giver)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        let offer_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO swap_offers (project_id, giver_id) VALUES ($1, $2) RETURNING id",
-        )
-        .bind(project_id)
-        .bind(giver)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        let payload = serde_json::json!({
-            "project_id": project_id,
-            "offer_id": offer_id,
-            "giver_id": giver,
-        });
-        sqlx::query("INSERT INTO outbox_events (type, payload) VALUES ('swap.created', $1)")
-            .bind(sqlx::types::Json(payload))
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        return Ok((project_id, offer_id));
+        tx.rollback().await?;
+        let retry = oldest
+            .map(|t| (86_400 - (Utc::now() - t).num_seconds()).max(1) as u64)
+            .unwrap_or(3_600);
+        return Err(DbError::DailyCap(retry));
     }
-    Err(DbError::Conflict(
-        "concurrent registration, please retry".into(),
-    ))
+
+    let project_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects (title, one_liner, link_url, voice_url, skill_needed, time_bucket, energy, giver_id)
+         VALUES ($1, $2, $3, $4, $5, $6::time_bucket, $7::energy, $8) RETURNING id",
+    )
+    .bind(&v.title)
+    .bind(&v.one_liner)
+    .bind(&v.link_url)
+    .bind(&v.voice_url)
+    .bind(&v.skill_needed)
+    .bind(&v.time_bucket)
+    .bind(&v.energy)
+    .bind(giver)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let offer_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO swap_offers (project_id, giver_id) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(project_id)
+    .bind(giver)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let payload = serde_json::json!({
+        "project_id": project_id,
+        "offer_id": offer_id,
+        "giver_id": giver,
+    });
+    sqlx::query("INSERT INTO outbox_events (type, payload) VALUES ('swap.created', $1)")
+        .bind(sqlx::types::Json(payload))
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok((project_id, offer_id))
 }
+
+/// Column list shared by every PoolRow query (alias p = projects,
+/// u = giver, o = lateral OPEN offer).
+const POOL_COLS: &str = "p.id, p.title, p.one_liner, p.link_url, p.voice_url, p.skill_needed,
+     p.time_bucket::text AS time_bucket, p.energy::text AS energy,
+     u.handle AS giver_handle, p.created_at, o.id AS offer_id";
+const POOL_FROM: &str = "FROM projects p JOIN users u ON u.id = p.giver_id
+     LEFT JOIN LATERAL (
+       SELECT id FROM swap_offers so
+       WHERE so.project_id = p.id AND so.status = 'OPEN'::offer_status
+       ORDER BY so.created_at LIMIT 1
+     ) o ON TRUE";
 
 /// Cursor-keyed pool page (newest first). Unknown cursor restarts from the top.
 pub async fn list_pool(
@@ -187,21 +154,18 @@ pub async fn list_pool(
         None => None,
     };
     let (t, i) = bound.unwrap_or((Utc::now(), Uuid::max()));
-    let rows: Vec<PoolRow> = sqlx::query_as(
-        "SELECT p.id, o.id AS offer_id, p.title, p.one_liner, p.link_url, p.voice_url,
-                p.skill_needed, p.time_bucket::text AS time_bucket, p.energy::text AS energy,
-                u.handle AS giver_handle, p.created_at
-         FROM projects p JOIN users u ON u.id = p.giver_id
-         LEFT JOIN swap_offers o ON o.project_id = p.id AND o.status = 'OPEN'::offer_status
+    let sql = format!(
+        "SELECT {POOL_COLS} {POOL_FROM}
          WHERE p.status = 'OPEN'::project_status AND (p.created_at, p.id) < ($1, $2)
          ORDER BY p.created_at DESC, p.id DESC
-         LIMIT $3",
-    )
-    .bind(t)
-    .bind(i)
-    .bind(limit + 1)
-    .fetch_all(pool)
-    .await?;
+         LIMIT $3"
+    );
+    let rows: Vec<PoolRow> = sqlx::query_as(&sql)
+        .bind(t)
+        .bind(i)
+        .bind(limit + 1)
+        .fetch_all(pool)
+        .await?;
     let more = rows.len() as i64 > limit;
     let mut page = rows;
     if more {
@@ -647,6 +611,187 @@ pub async fn all_revives(pool: &PgPool, taker: Uuid) -> Result<Vec<Revive>, DbEr
         });
     }
     Ok(out)
+}
+
+/// Session user's identity + skill profile.
+#[derive(Debug, Clone, Serialize)]
+pub struct UserInfo {
+    pub id: Uuid,
+    pub handle: String,
+    pub email: String,
+    pub can_do: Vec<String>,
+    pub looking_for: Vec<String>,
+}
+
+pub async fn user_info(pool: &PgPool, id: Uuid) -> Result<Option<UserInfo>, DbError> {
+    let row = sqlx::query("SELECT id, handle, email, can_do, looking_for FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(r) = row else { return Ok(None) };
+    Ok(Some(UserInfo {
+        id: r.try_get("id")?,
+        handle: r.try_get("handle")?,
+        email: r.try_get("email")?,
+        can_do: r.try_get("can_do")?,
+        looking_for: r.try_get("looking_for")?,
+    }))
+}
+
+/// Updates the session user's skills (identity is never edited here).
+pub async fn set_skills(
+    pool: &PgPool,
+    id: Uuid,
+    can_do: &[String],
+    looking_for: &[String],
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE users SET can_do = $1, looking_for = $2 WHERE id = $3")
+        .bind(can_do)
+        .bind(looking_for)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// One project with its lifecycle status and owner (for /q/{id} and the
+/// take screen). Includes hidden/matched ones so callers can explain why
+/// a quest is no longer available.
+#[derive(Debug, Serialize)]
+pub struct ProjectDetail {
+    #[serde(flatten)]
+    pub row: PoolRow,
+    pub status: String,
+    #[serde(skip)]
+    pub giver_id: Uuid,
+}
+
+pub async fn get_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectDetail>, DbError> {
+    let sql = format!(
+        "SELECT {POOL_COLS}, p.status::text AS status, p.giver_id {POOL_FROM} WHERE p.id = $1"
+    );
+    let row = sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
+    let Some(r) = row else { return Ok(None) };
+    Ok(Some(ProjectDetail {
+        row: pool_row_from(&r)?,
+        status: r.try_get("status")?,
+        giver_id: r.try_get("giver_id")?,
+    }))
+}
+
+/// Project behind an offer id (any status).
+pub async fn project_for_offer(
+    pool: &PgPool,
+    offer: Uuid,
+) -> Result<Option<ProjectDetail>, DbError> {
+    let pid: Option<Uuid> = sqlx::query_scalar("SELECT project_id FROM swap_offers WHERE id = $1")
+        .bind(offer)
+        .fetch_optional(pool)
+        .await?;
+    match pid {
+        Some(p) => get_project(pool, p).await,
+        None => Ok(None),
+    }
+}
+
+/// Full rows for ranked ids, returned in the SAME order as `ids`
+/// (missing ids are skipped).
+pub async fn projects_by_ids(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<PoolRow>, DbError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!("SELECT {POOL_COLS} {POOL_FROM} WHERE p.id = ANY($1)");
+    let rows: Vec<PoolRow> = sqlx::query_as(&sql).bind(ids).fetch_all(pool).await?;
+    let mut by_id: std::collections::HashMap<Uuid, PoolRow> =
+        rows.into_iter().map(|r| (r.id, r)).collect();
+    Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
+}
+
+/// A quest the user dropped, with where it is now.
+#[derive(Debug, Serialize)]
+pub struct MyQuest {
+    #[serde(flatten)]
+    pub row: PoolRow,
+    /// OPEN (in pool) | MATCHED (passed on) | CLOSED (hidden by reports)
+    pub status: String,
+}
+
+/// Everything the user dropped, newest first. OPEN ones carry `offer_id`
+/// (what the take screen offers in exchange).
+pub async fn my_quests(pool: &PgPool, user: Uuid) -> Result<Vec<MyQuest>, DbError> {
+    let sql = format!(
+        "SELECT {POOL_COLS}, p.status::text AS status {POOL_FROM}
+         WHERE p.giver_id = $1
+         ORDER BY p.created_at DESC, p.id DESC LIMIT 200"
+    );
+    let rows = sqlx::query(&sql).bind(user).fetch_all(pool).await?;
+    rows.iter()
+        .map(|r| {
+            Ok(MyQuest {
+                row: pool_row_from(r)?,
+                status: r.try_get("status")?,
+            })
+        })
+        .collect()
+}
+
+fn pool_row_from(r: &sqlx::postgres::PgRow) -> Result<PoolRow, DbError> {
+    Ok(PoolRow {
+        id: r.try_get("id")?,
+        title: r.try_get("title")?,
+        one_liner: r.try_get("one_liner")?,
+        link_url: r.try_get("link_url")?,
+        voice_url: r.try_get("voice_url")?,
+        skill_needed: r.try_get("skill_needed")?,
+        time_bucket: r.try_get("time_bucket")?,
+        energy: r.try_get("energy")?,
+        giver_handle: r.try_get("giver_handle")?,
+        created_at: r.try_get("created_at")?,
+        offer_id: r.try_get("offer_id")?,
+    })
+}
+
+/// Projects this user already reported (the card hides its report menu).
+pub async fn reported_ids(pool: &PgPool, reporter: Uuid) -> Result<Vec<Uuid>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT project_id FROM reports WHERE reporter_id = $1")
+            .bind(reporter)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+/// Seconds until this user may drop again, or None if under the daily cap.
+/// Read-only twin of the check inside `create_drop_as` (which stays the
+/// authority); lets the form say so before the user fills it in.
+pub async fn daily_cap_retry(pool: &PgPool, user: Uuid) -> Result<Option<u64>, DbError> {
+    let (n, oldest): (i64, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(created_at) FROM projects
+         WHERE giver_id = $1 AND created_at > now() - interval '1 day'",
+    )
+    .bind(user)
+    .fetch_one(pool)
+    .await?;
+    if n < MAX_DROPS_PER_DAY {
+        return Ok(None);
+    }
+    Ok(Some(
+        oldest
+            .map(|t| (86_400 - (Utc::now() - t).num_seconds()).max(1) as u64)
+            .unwrap_or(3_600),
+    ))
+}
+
+/// Seconds until this email may get another login link (0 = now).
+pub async fn login_cooldown(pool: &PgPool, email: &str, window_secs: i64) -> Result<i64, DbError> {
+    let last: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT MAX(created_at) FROM magic_tokens WHERE email = $1")
+            .bind(email)
+            .fetch_one(pool)
+            .await?;
+    Ok(last
+        .map(|t| (window_secs - (Utc::now() - t).num_seconds()).max(0))
+        .unwrap_or(0))
 }
 
 /// One of the caller's own offers with its project: what a client lists

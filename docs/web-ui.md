@@ -6,6 +6,8 @@ Date: 2026-10-12 · Scope: [plan.md](./plan.md) phase 5 · API: [openapi.yaml](.
 
 This document describes what the QuestDrop web UI should be. Whoever builds the UI can treat it as the contract. Every screen maps to the API as it exists today; what the API still lacks is listed in §10.
 
+> **Status (2026-10-12): implemented.** Code: `src/web.rs`, `templates/`, `static/`, `i18n/`. Open questions in §13 were decided as recommended: drops need login (§5.2), voice option A (§6), English + Turkish (§9); external voice links stay allowed with an "external audio" label. Deviations: CSP `media-src` also allows `blob:` so the recorder can preview a take before upload; the desktop nav switches to the bottom tab bar below 960 px (not 768 px) because four labels plus the handle do not fit in between.
+
 ---
 
 ## 1. Who is it for, how should it feel?

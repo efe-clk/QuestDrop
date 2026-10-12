@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ c.t("login.title") }} – QuestDrop{% endblock %}
+{% block main %}
+<section class="narrow">
+{% if mode == "confirm" %}
+  <h1 class="page__h">{{ c.t("login.confirm_title") }}</h1>
+  <p class="lead">{{ c.t("login.confirm_body") }}</p>
+  <form method="post" action="/login/confirm" hx-disabled-elt="find button">
+    <input type="hidden" name="token" value="{{ token }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="btn btn--primary btn--lg btn--block" type="submit"{% if c.db_down %} disabled{% endif %}>{{ c.t("login.confirm") }}</button>
+  </form>
+{% else if mode == "sent" %}
+  <h1 class="page__h">{{ c.t("login.sent_title") }}</h1>
+  <p class="lead" role="status">{{ c.tf("login.sent_body", email) }}</p>
+  <form method="post" action="/login" hx-disabled-elt="find button">
+    <input type="hidden" name="email" value="{{ email }}">
+    <input type="hidden" name="handle" value="{{ handle }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="btn btn--secondary" type="submit" data-countdown="{{ wait }}" data-countdown-text="{{ c.t("login.resend_wait") }}">{{ c.t("login.resend") }}</button>
+    <p class="help" data-countdown-out aria-live="polite"></p>
+  </form>
+{% else %}
+  {% if mode == "expired" %}
+  <h1 class="page__h">{{ c.t("login.expired_title") }}</h1>
+  <p class="lead">{{ c.t("login.expired_body") }}</p>
+  {% else %}
+  <h1 class="page__h">{{ c.t("login.title") }}</h1>
+  <p class="lead">{% if need %}{{ c.t("login.need") }}{% else %}{{ c.t("login.intro") }}{% endif %}</p>
+  {% endif %}
+  <form class="form" method="post" action="/login" hx-disabled-elt="find button" novalidate>
+    <input type="hidden" name="next" value="{{ next }}">
+    {% if err_email.is_some() || err_handle.is_some() %}
+    <div class="alert" role="alert">
+      <ul>{% if let Some(e) = err_email %}<li>{{ e }}</li>{% endif %}{% if let Some(e) = err_handle %}<li>{{ e }}</li>{% endif %}</ul>
+    </div>
+    {% endif %}
+    <div class="field{% if err_email.is_some() %} field--err{% endif %}">
+      <label class="label" for="email">{{ c.t("login.email") }}</label>
+      <input class="input" id="email" name="email" type="email" autocomplete="email" inputmode="email" required value="{{ email }}" aria-describedby="email-h{% if err_email.is_some() %} email-e{% endif %}"{% if err_email.is_some() %} aria-invalid="true"{% endif %} autofocus>
+      <p class="help" id="email-h">{{ c.t("login.email_help") }}</p>
+      {% if let Some(e) = err_email %}<p class="err" id="email-e">{{ e }}</p>{% endif %}
+    </div>
+    <details class="field disclose"{% if !handle.is_empty() || err_handle.is_some() %} open{% endif %}>
+      <summary class="disclose__s">{{ c.t("login.handle") }}</summary>
+      <input class="input" id="handle" name="handle" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="24" pattern="[a-z0-9_]{3,24}" value="{{ handle }}" aria-label="{{ c.t("login.handle") }}" aria-describedby="handle-h"{% if err_handle.is_some() %} aria-invalid="true"{% endif %}>
+      <p class="help" id="handle-h">{{ c.t("login.handle_help") }}</p>
+      {% if let Some(e) = err_handle %}<p class="err">{{ e }}</p>{% endif %}
+    </details>
+    <button class="btn btn--primary btn--lg btn--block" type="submit"{% if c.db_down %} disabled{% endif %}>{{ c.t("login.send") }}</button>
+  </form>
+{% endif %}
+{% if c.dev_mode %}<p class="devnote">{{ c.t("common.dev_mode") }}</p>{% endif %}
+</section>
+{% endblock %}
