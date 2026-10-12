@@ -15,7 +15,7 @@ Success criterion: strangers trading in the open pool.
 | C: `EmbeddingMatcher` (local trigram + cosine, `?algo=embedding`) | Done |
 | Web UI (Askama + HTMX, English + Turkish) | Done: pool, login, drop with in-browser voice recording, match, swap, revive, profile, report |
 | Tests | 64 Rust tests green (25 unit + 31 API + 8 web) plus a Playwright browser E2E |
-| Deploy | **Not deployed.** Ready for Coolify (`docker-compose.yml`, see below) and Fly (`fly.toml`). |
+| Deploy | **Not deployed.** Ready for Coolify (`docker-compose.yaml`, see below) and Fly (`fly.toml`). |
 
 The web UI follows [docs/web-ui.md](./docs/web-ui.md); every page works without JavaScript and HTMX only speeds it up.
 
@@ -86,9 +86,9 @@ Bot (outbox delivery): `cargo run --bin bot`.
 
 ## Deploy on Coolify
 
-`docker-compose.yml` is a complete Coolify stack: app, `bot` (outbox worker) and Postgres 16 with persistent volumes.
+`docker-compose.yaml` is a complete Coolify stack: app, `bot` (outbox worker) and Postgres 16 with persistent volumes.
 
-1. In Coolify: **+ New** → pick this repository → set **Build Pack** to **Docker Compose** (file: `/docker-compose.yml`).
+1. In Coolify: **+ New** → pick this repository → set **Build Pack** to **Docker Compose** (Coolify's default Compose location, `/docker-compose.yaml`, already matches).
 2. **Deploy.**
 
 Coolify generates everything else: the public URL (`SERVICE_URL_QUESTDROP_3000`, routed to port 3000, also used as `BASE_URL`), the Postgres user and password, and `SESSION_SECRET`. Migrations run on boot. The app waits for a healthy Postgres and reports healthy only once `/ready` answers.

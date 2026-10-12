@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && rm -rf /var/lib/apt/lists/* \
   && useradd -r -u 10001 appuser
 COPY --from=build /app/target/release/questdrop ./questdrop
-# Outbox delivery worker (docker-compose.yml runs it as the `bot` service).
+# Outbox delivery worker (docker-compose.yaml runs it as the `bot` service).
 COPY --from=build /app/target/release/bot ./bot
 COPY static ./static
 # NOTE: templates/ and i18n/ are compiled into the binary at build time;
