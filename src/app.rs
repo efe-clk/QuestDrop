@@ -645,20 +645,75 @@ async fn me(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Respon
         Err(e) => db_error(DbError::Db(e)),
     }
 }
-/// MP3 upload (session required): streams the "file" field, enforces a 5MB
-/// cap while reading (the global 2MB default is disabled for this route),
-/// checks magic bytes (ID3 or frame sync), stores under a random name so
+#[derive(Deserialize)]
+struct MyOffersQuery {
+    status: Option<String>,
+}
+
+/// The session user's own offers (newest first), optionally `?status=open`
+/// (or matched/closed). A swap's give side is picked from this list.
+async fn my_offers(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    q: Result<Query<MyOffersQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let uid = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
+        }
+    };
+    let status = match q.status.as_deref().map(|v| v.trim().to_uppercase()) {
+        None => None,
+        Some(v) if matches!(v.as_str(), "OPEN" | "MATCHED" | "CLOSED") => Some(v),
+        Some(_) => {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "status must be open, matched or closed",
+            )
+            .into_response();
+        }
+    };
+    match db::my_offers(pool, uid, status.as_deref()).await {
+        Ok(offers) => Json(serde_json::json!({ "offers": offers })).into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
+/// Voice upload (session required): streams the "file" field, enforces a
+/// 5MB cap while reading (the global 2MB default is disabled for this route),
+/// sniffs the container from magic bytes, stores under a random name so
 /// client filenames can never traverse. Duration check stays pending.
 const VOICE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
-fn looks_like_mp3(head: &[u8]) -> bool {
+/// File extension for a supported voice container, from its magic bytes.
+/// mp3 (ID3 or MPEG frame sync), Ogg (Opus/Vorbis, Firefox recordings),
+/// WebM/Matroska (Opus, Chrome recordings), ISO-BMFF `ftyp` (AAC, Safari
+/// recordings). The codec inside is not inspected.
+fn sniff_audio(head: &[u8]) -> Option<&'static str> {
     if head.len() < 4 {
-        return false;
+        return None;
     }
-    if &head[0..3] == b"ID3" {
-        return true;
+    if &head[0..3] == b"ID3" || (head[0] == 0xFF && head[1] & 0xE0 == 0xE0) {
+        return Some("mp3");
     }
-    head[0] == 0xFF && head[1] & 0xE0 == 0xE0
+    if &head[0..4] == b"OggS" {
+        return Some("ogg");
+    }
+    if head[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return Some("webm");
+    }
+    if head.len() >= 8 && &head[4..8] == b"ftyp" {
+        return Some("m4a");
+    }
+    None
 }
 
 async fn upload_voice(
@@ -706,14 +761,14 @@ async fn upload_voice(
                 }
             }
         }
-        if !looks_like_mp3(&bytes) {
+        let Some(ext) = sniff_audio(&bytes) else {
             return problem(
                 StatusCode::BAD_REQUEST,
-                "not an mp3 (ID3 or frame sync required)",
+                "unsupported audio: mp3, ogg, webm or m4a required",
             )
             .into_response();
-        }
-        let name = format!("{}.mp3", uuid::Uuid::new_v4());
+        };
+        let name = format!("{}.{ext}", uuid::Uuid::new_v4());
         if tokio::fs::write(s.voice_dir.join(&name), &bytes)
             .await
             .is_err()
@@ -800,6 +855,7 @@ pub fn build_app(pool: Option<sqlx::PgPool>) -> Router {
         .route("/v1/auth/callback", post(auth_callback))
         .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/me", get(me))
+        .route("/v1/me/offers", get(my_offers))
         .route("/v1/projects", get(list_projects))
         .route(
             "/v1/projects",
@@ -962,4 +1018,21 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sniff_audio;
+
+    #[test]
+    fn sniff_audio_maps_browser_recordings() {
+        assert_eq!(sniff_audio(b"ID3\x04\x00\x00\x00\x00"), Some("mp3"));
+        assert_eq!(sniff_audio(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
+        assert_eq!(sniff_audio(b"OggS\x00\x02\x00\x00"), Some("ogg"));
+        assert_eq!(sniff_audio(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F]), Some("webm"));
+        assert_eq!(sniff_audio(b"\x00\x00\x00\x20ftypM4A "), Some("m4a"));
+        assert_eq!(sniff_audio(b"RIFF\x00\x00\x00\x00WAVE"), None);
+        assert_eq!(sniff_audio(b"\x00\x00\x00\x20ft"), None, "truncated ftyp");
+        assert_eq!(sniff_audio(b"ID"), None);
+    }
 }

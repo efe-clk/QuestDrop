@@ -47,9 +47,10 @@ paths:
     post:
       summary: Request a magic-link email (15-min single-use token)
       description: >
-        Sends `BASE_URL/login?token=...` through SMTP (when SMTP_URL is set)
-        or writes it to the log. NOTE: no /login page exists yet; a client
-        must read the token from that URL and POST it to /v1/auth/callback.
+        Sends `LOGIN_URL?token=...` (default `BASE_URL/login?token=...`)
+        through SMTP (when SMTP_URL is set) or writes it to the log. The API
+        serves no /login page: the client page at LOGIN_URL must read the
+        token and POST it to /v1/auth/callback.
       requestBody:
         required: true
         content:
@@ -108,12 +109,37 @@ paths:
           $ref: '#/components/responses/Problem'
         '404':
           $ref: '#/components/responses/Problem'
+  /v1/me/offers:
+    get:
+      summary: The session user's own offers, newest first (LOGIN REQUIRED, max 200)
+      description: Use the OPEN ones as give_offer_id in POST /v1/swaps.
+      parameters:
+        - {name: status, in: query, required: false, schema: {type: string, enum: [open, matched, closed]}, description: case-insensitive filter}
+      responses:
+        '200':
+          description: offers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  offers:
+                    type: array
+                    items: {$ref: '#/components/schemas/MyOffer'}
+        '400':
+          $ref: '#/components/responses/Problem'
+        '401':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   /v1/voice:
     post:
-      summary: Upload an mp3 (LOGIN REQUIRED)
+      summary: Upload a voice note (LOGIN REQUIRED)
       description: >
-        5 MB cap, ID3 or MPEG frame-sync magic bytes, stored under a random
-        name. Duration is NOT checked. Refused with 507 once VOICE_DIR reaches
+        Accepts mp3 (ID3 / MPEG frame sync), Ogg (Opus/Vorbis), WebM (Opus)
+        and ISO-BMFF `ftyp` (m4a/AAC), sniffed from magic bytes; the codec
+        inside is not inspected. 5 MB cap, stored under a random name with the
+        sniffed extension. Duration is NOT checked. Refused with 507 once VOICE_DIR reaches
         VOICE_QUOTA_MB (default 500).
       requestBody:
         required: true
@@ -128,7 +154,7 @@ paths:
                   format: binary
       responses:
         '201':
-          description: '{"voice_url": "/voice/<uuid>.mp3"}'
+          description: '{"voice_url": "/voice/<uuid>.<mp3|ogg|webm|m4a>"}'
         '400':
           $ref: '#/components/responses/Problem'
         '401':
@@ -155,8 +181,8 @@ paths:
     get:
       summary: OPEN pool, newest first, cursor pages (limit default 20, max 50)
       description: >
-        Items carry the PROJECT id only. POST /v1/swaps needs OFFER ids, which
-        this response does not expose yet (see docs/plan.md, phase 5).
+        `id` is the project id; `offer_id` is its OPEN offer, the value
+        POST /v1/swaps takes as take_offer_id.
       parameters:
         - {name: cursor, in: query, schema: {type: string, format: uuid}, description: 'last project id of the previous page; unknown ids restart from the top'}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 20}}
@@ -240,7 +266,7 @@ paths:
         `rule` (default) returns top-3 + 1 random surprise, score = 0.8 x skill
         fit + 0.2 x random; time_bucket and energy are not scored.
         `embedding` returns the top 4 by trigram cosine, deterministic.
-        Item `id` is a PROJECT id.
+        Item `id` is the project id, `offer_id` its OPEN offer.
       parameters:
         - {name: user_id, in: query, required: true, schema: {type: string, format: uuid}}
         - {name: algo, in: query, required: false, schema: {type: string, enum: [rule, embedding], default: rule}}
@@ -372,7 +398,7 @@ components:
         title: {type: string, minLength: 3, maxLength: 80}
         one_liner: {type: string, minLength: 10, maxLength: 200}
         link_url: {type: string, maxLength: 2048, description: 'http(s) URL'}
-        voice_url: {type: string, maxLength: 2048, description: '/voice/*.mp3 path or http(s) URL whose path ends in .mp3'}
+        voice_url: {type: string, maxLength: 2048, description: '/voice/... path or http(s) URL whose path ends in .mp3, .ogg, .webm or .m4a'}
         skill_needed: {type: array, items: {type: string, maxLength: 32}, description: 'lowercased, deduplicated, first 10 kept'}
         time_bucket: {type: string, enum: [S, M, L], description: 'case-insensitive; S <2h, M 2-8h, L >8h'}
         energy: {type: string, enum: [LOW, MID, HIGH], description: case-insensitive}
@@ -411,6 +437,7 @@ components:
       type: object
       properties:
         id: {type: string, format: uuid, description: project id}
+        offer_id: {type: string, format: uuid, description: 'OPEN offer of the project (omitted inside a Revive)'}
         title: {type: string}
         one_liner: {type: string}
         link_url: {type: string}
@@ -424,11 +451,26 @@ components:
       type: object
       properties:
         id: {type: string, description: project id}
+        offer_id: {type: string, description: OPEN offer of the project}
         skill_needed: {type: array, items: {type: string}}
         time_bucket: {type: string}
         energy: {type: string}
         score: {type: number}
         reason: {type: string, example: 'fit=0.50 rand=0.31'}
+    MyOffer:
+      type: object
+      properties:
+        offer_id: {type: string, format: uuid}
+        offer_status: {type: string, enum: [OPEN, MATCHED, CLOSED]}
+        project_id: {type: string, format: uuid}
+        title: {type: string}
+        one_liner: {type: string}
+        link_url: {type: string}
+        voice_url: {type: string}
+        skill_needed: {type: array, items: {type: string}}
+        time_bucket: {type: string, enum: [S, M, L]}
+        energy: {type: string, enum: [LOW, MID, HIGH]}
+        created_at: {type: string, format: date-time}
     Revive:
       type: object
       properties:

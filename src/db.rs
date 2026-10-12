@@ -36,6 +36,10 @@ impl From<sqlx::Error> for DbError {
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct PoolRow {
     pub id: Uuid,
+    /// The project's OPEN offer (what POST /v1/swaps takes). None once the
+    /// project left the pool, e.g. inside a revive package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<Uuid>,
     pub title: String,
     pub one_liner: String,
     pub link_url: String,
@@ -184,10 +188,11 @@ pub async fn list_pool(
     };
     let (t, i) = bound.unwrap_or((Utc::now(), Uuid::max()));
     let rows: Vec<PoolRow> = sqlx::query_as(
-        "SELECT p.id, p.title, p.one_liner, p.link_url, p.voice_url, p.skill_needed,
-                p.time_bucket::text AS time_bucket, p.energy::text AS energy,
+        "SELECT p.id, o.id AS offer_id, p.title, p.one_liner, p.link_url, p.voice_url,
+                p.skill_needed, p.time_bucket::text AS time_bucket, p.energy::text AS energy,
                 u.handle AS giver_handle, p.created_at
          FROM projects p JOIN users u ON u.id = p.giver_id
+         LEFT JOIN swap_offers o ON o.project_id = p.id AND o.status = 'OPEN'::offer_status
          WHERE p.status = 'OPEN'::project_status AND (p.created_at, p.id) < ($1, $2)
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT $3",
@@ -237,9 +242,10 @@ pub async fn match_candidates(
     giver: Uuid,
 ) -> Result<Vec<crate::matcher::PoolItem>, DbError> {
     Ok(sqlx::query_as::<_, crate::matcher::PoolItem>(
-        "SELECT p.id::text AS id, p.skill_needed,
+        "SELECT p.id::text AS id, o.id::text AS offer_id, p.skill_needed,
                 p.time_bucket::text AS time_bucket, p.energy::text AS energy
          FROM projects p
+         JOIN swap_offers o ON o.project_id = p.id AND o.status = 'OPEN'::offer_status
          WHERE p.status = 'OPEN'::project_status AND p.giver_id != $1
          ORDER BY p.created_at DESC LIMIT 100",
     )
@@ -435,6 +441,7 @@ pub async fn create_swap(
         },
         &crate::matcher::PoolItem {
             id: String::new(),
+            offer_id: String::new(),
             skill_needed: taken_skills,
             time_bucket: String::new(),
             energy: String::new(),
@@ -620,6 +627,7 @@ pub async fn all_revives(pool: &PgPool, taker: Uuid) -> Result<Vec<Revive>, DbEr
     for r in rows {
         let project = PoolRow {
             id: r.try_get("id")?,
+            offer_id: None,
             title: r.try_get("title")?,
             one_liner: r.try_get("one_liner")?,
             link_url: r.try_get("link_url")?,
@@ -641,6 +649,45 @@ pub async fn all_revives(pool: &PgPool, taker: Uuid) -> Result<Vec<Revive>, DbEr
     Ok(out)
 }
 
+/// One of the caller's own offers with its project: what a client lists
+/// when the taker picks which quest to give in a swap.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct MyOffer {
+    pub offer_id: Uuid,
+    /// OPEN | MATCHED | CLOSED
+    pub offer_status: String,
+    pub project_id: Uuid,
+    pub title: String,
+    pub one_liner: String,
+    pub link_url: String,
+    pub voice_url: String,
+    pub skill_needed: Vec<String>,
+    pub time_bucket: String,
+    pub energy: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The giver's offers, newest first (cap 200), optionally filtered by
+/// status (already normalized to OPEN | MATCHED | CLOSED by the caller).
+pub async fn my_offers(
+    pool: &PgPool,
+    giver: Uuid,
+    status: Option<&str>,
+) -> Result<Vec<MyOffer>, DbError> {
+    Ok(sqlx::query_as::<_, MyOffer>(
+        "SELECT o.id AS offer_id, o.status::text AS offer_status, p.id AS project_id,
+                p.title, p.one_liner, p.link_url, p.voice_url, p.skill_needed,
+                p.time_bucket::text AS time_bucket, p.energy::text AS energy, o.created_at
+         FROM swap_offers o JOIN projects p ON p.id = o.project_id
+         WHERE o.giver_id = $1 AND ($2::text IS NULL OR o.status::text = $2)
+         ORDER BY o.created_at DESC, o.id DESC LIMIT 200",
+    )
+    .bind(giver)
+    .bind(status)
+    .fetch_all(pool)
+    .await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,6 +695,7 @@ mod tests {
     fn row() -> PoolRow {
         PoolRow {
             id: Uuid::nil(),
+            offer_id: None,
             title: "Demo".into(),
             one_liner: "x".into(),
             link_url: "https://x.y".into(),

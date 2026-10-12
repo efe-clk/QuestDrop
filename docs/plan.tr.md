@@ -3,7 +3,7 @@
 # QuestDrop — Rust Yapım Planı
 
 Durum (2026-10-12): **Backend bitti, web arayüzü açık, yayında değil.**
-Faz 0-4 ile B ve C API seviyesinde yazıldı (45 test yeşil). Faz 1-4'ün kullanıcıya bakan yarısı (formlar ve sayfalar) hiç yapılmadı. Faz 5 bunu kapsar.
+Faz 0-4 ile B ve C API seviyesinde yazıldı (50 test yeşil). Faz 1-4'ün kullanıcıya bakan yarısı (formlar ve sayfalar) hiç yapılmadı. Faz 5 bunu kapsar.
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
@@ -70,12 +70,12 @@ Bu faz öncesinde ya da sırasında kapatılacak API eksikleri:
 
 | # | Eksik | Arayüzü neden engelliyor |
 |---|---|---|
-| 1 | `/login` route'u yok | e-postadaki link JSON 404'e düşer |
-| 2 | Havuz, eşleşme ve canlandır cevapları **proje** id'si taşıyor, ama `POST /v1/swaps` **teklif** id'si istiyor | arayüz takas isteğini kuramaz; havuz/eşleşme öğelerine `offer_id` eklenmeli |
-| 3 | "Açık tekliflerim" endpoint'i yok (`offer_id`'yi sadece bırakma cevabı döner) | alan kişi hangi quest'ini vereceğini seçemez |
+| 1 | ✅ 2026-10-12: e-postadaki linkin hedefi ayarlanabilir (`LOGIN_URL`); `/login` sayfasının kendisi arayüz işi | link, token'ı POST eden bir sayfayı açmalı |
+| 2 | ✅ 2026-10-12: havuz ve eşleşme öğelerinde `offer_id` var | `POST /v1/swaps` teklif id'si istiyor |
+| 3 | ✅ 2026-10-12: `GET /v1/me/offers?status=` | alan kişi hangi quest'ini vereceğini seçer |
 | 4 | CORS katmanı yok | başka bir origin'deki arayüz API'yi cookie ile çağıramaz; arayüzü bu binary'den sun ya da credentials'lı CORS ekle |
 
-Ayrıca: ana sayfa `/v1/match`'e `user_id` olmadan link veriyor (400 döner), ses süresi denetlenmiyor.
+2026-10-12'de ayrıca yapıldı: ses yükleme tarayıcı kayıtlarını kabul ediyor (ogg, webm, m4a). Hâlâ açık: ana sayfa `/v1/match`'e `user_id` olmadan link veriyor (400 döner), ses süresi denetlenmiyor.
 
 Bitti tanımı: tanımadığın biri tarayıcıdan bırakır, giriş yapar, eşleşir, takas eder ve canlandırır.
 

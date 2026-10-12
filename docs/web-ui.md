@@ -169,7 +169,7 @@ Every `QuestCard` has a "⋯" menu → "Report" → a small dialog (reason, 10�
 
 ## 6. Voice note (the riskiest part)
 
-**Problem:** the backend accepts **mp3 only** (magic bytes + `.mp3` extension). Browsers do not record mp3 natively: Chrome/Firefox record Opus in webm/ogg, Safari records AAC in mp4 ([MDN `isTypeSupported`](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/isTypeSupported_static), [addpipe](https://blog.addpipe.com/recording-audio-in-the-browser-using-pure-html5-and-minimal-javascript)). Uploading an in-browser recording as-is gets a 400.
+**Status (2026-10-12): solved with option A.** The backend now accepts mp3, ogg, webm and m4a. The original problem, kept for context: the backend accepted **mp3 only** (magic bytes + `.mp3` extension). Browsers do not record mp3 natively: Chrome/Firefox record Opus in webm/ogg, Safari records AAC in mp4 ([MDN `isTypeSupported`](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/isTypeSupported_static), [addpipe](https://blog.addpipe.com/recording-audio-in-the-browser-using-pure-html5-and-minimal-javascript)). Uploading an in-browser recording as-is got a 400.
 
 Options:
 
@@ -179,7 +179,7 @@ Options:
 | B | Encode to mp3 in the browser (lamejs-style library) | Backend unchanged | ~150 KB extra JS, slow on mobile, weakly maintained libraries |
 | C | Transcode to mp3 on the server with ffmpeg | Simple client | Bigger image, CPU, new attack surface |
 
-**Recommendation: A.** The UI tries `MediaRecorder.isTypeSupported()` in order: `audio/webm;codecs=opus` → `audio/ogg;codecs=opus` → `audio/mp4`. File upload always stays available (for people with a ready audio file).
+**Chosen: A.** The UI tries `MediaRecorder.isTypeSupported()` in order: `audio/webm;codecs=opus` → `audio/ogg;codecs=opus` → `audio/mp4`. File upload always stays available (for people with a ready audio file).
 
 **Recorder component:**
 - A big round "Record" button, with a timer and a level meter while recording.
@@ -256,17 +256,17 @@ By default HTMX does not swap 4xx/5xx responses into the page. UI handlers retur
 
 | # | Work | Why | Size |
 |---|---|---|---|
-| 1 | `/login` page (GET shows the token, POST consumes it) | the emailed link is a 404 today | small |
-| 2 | `offer_id` on pool and match items | swaps use offer ids | small (join in the query) |
-| 3 | "My open/given quests" query (`/v1/me/offers` + `db` function) | required by `/take` and `/revive` tab 2 | small |
+| 1 | ✅ Backend part done: set `LOGIN_URL` to the UI's login page. The page itself (GET shows the token, POST consumes it) is UI work | the emailed link must open it | small |
+| 2 | ✅ `offer_id` on pool and match items | swaps use offer ids | done |
+| 3 | ✅ `GET /v1/me/offers?status=` | required by `/take` and `/revive` tab 2 | done |
 | 4 | (Only if a separate-origin SPA is chosen) CORS with credentials | not needed in the same binary | small |
-| 5 | Voice format: accept Opus/AAC (§6, option A) | in-browser recording | medium |
+| 5 | ✅ Voice format: mp3, ogg, webm, m4a (§6, option A) | in-browser recording | done |
 | 6 | Single-quest query (for `/q/{id}`) | shareable page | small |
 | 7 | The UI calls `/match` and `/revive` with the session user; the REST side requires login | privacy gap in design §6 | small |
 | 8 | Require login for drops (§5.2 decision) | dropping in someone else's name | small; tests change |
 | 9 | Remove the `/v1/match` link from the home template | 400 without `user_id` | tiny |
 
-Without 1, 2, 3 and 5 the core loop (drop → match → take) cannot be completed in a browser.
+With 1, 2, 3 and 5 done (2026-10-12), the core loop (drop → match → take) is possible once the UI exists. Item 8 is still needed for the §5.2 decision.
 
 ---
 
@@ -297,7 +297,7 @@ Each slice can ship on its own:
 ## 13. Open questions
 
 1. Require login for drops? (This document assumes yes, §5.2.)
-2. Voice format: widen the backend (A) or encode to mp3 in the client (B)? (Recommendation: A, §6.)
+2. ~~Voice format~~: decided and done (A, §6).
 3. Disallow external voice links entirely?
 4. v1 language: English only, or English + Turkish? (Recommendation: both, via dictionary files.)
 5. Should the new owner of a swapped quest have a way to contact the giver? There is none today (DMs are out of scope). The giver's handle is visible, but there is no way to reach them.

@@ -3,7 +3,7 @@
 # QuestDrop — Rust Build Plan
 
 Status (2026-10-12): **Backend done, web UI open, not deployed.**
-Phases 0-4 plus B and C are implemented at the API level (45 tests green). The user-facing half of phases 1-4 (forms and pages) was never built. Phase 5 covers it.
+Phases 0-4 plus B and C are implemented at the API level (50 tests green). The user-facing half of phases 1-4 (forms and pages) was never built. Phase 5 covers it.
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 
@@ -70,12 +70,12 @@ API gaps to close before or during this phase:
 
 | # | Gap | Why it blocks the UI |
 |---|---|---|
-| 1 | No `/login` route | the emailed link lands on a JSON 404 |
-| 2 | Pool, match and revive responses carry **project** ids, but `POST /v1/swaps` needs **offer** ids | the UI cannot build a swap request; add `offer_id` to pool/match items |
-| 3 | No "my open offers" endpoint (only the drop response returns `offer_id`) | the taker cannot pick which of their quests to give |
+| 1 | ✅ 2026-10-12: emailed link target is configurable (`LOGIN_URL`); the `/login` page itself is UI work | the link must open a page that POSTs the token |
+| 2 | ✅ 2026-10-12: pool and match items carry `offer_id` | `POST /v1/swaps` needs offer ids |
+| 3 | ✅ 2026-10-12: `GET /v1/me/offers?status=` | the taker picks which of their quests to give |
 | 4 | No CORS layer | a UI on another origin cannot call the API with cookies; serve the UI from this binary or add CORS with credentials |
 
-Also: the home page links to `/v1/match` without `user_id` (returns 400), and voice duration is not checked.
+Also done on 2026-10-12: voice upload accepts browser recordings (ogg, webm, m4a). Still open: the home page links to `/v1/match` without `user_id` (returns 400), and voice duration is not checked.
 
 Done when a stranger can drop, log in, match, swap and revive in a browser.
 

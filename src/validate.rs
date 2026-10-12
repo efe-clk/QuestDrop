@@ -64,22 +64,29 @@ fn valid_http_url(u: &str, max_len: usize) -> bool {
     }
 }
 
-/// Voice must be an mp3: either a /voice/ relative path (local MVP storage)
-/// or an http(s) URL whose PATH ends in .mp3 (query strings ignored, so
-/// future signed URLs keep working). Duration (10-60s) is checked at upload
-/// time in a later phase; the format gate lives here.
+/// Audio extensions a voice URL may end in. Matches what POST /v1/voice
+/// stores: mp3, plus the containers browsers record natively (Ogg/WebM
+/// Opus, M4A/AAC).
+const VOICE_EXTENSIONS: [&str; 4] = [".mp3", ".ogg", ".webm", ".m4a"];
+
+fn has_voice_extension(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    VOICE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Voice must be an audio file: either a /voice/ relative path (local MVP
+/// storage) or an http(s) URL whose PATH ends in a voice extension (query
+/// strings ignored, so future signed URLs keep working). Duration (10-60s)
+/// is not checked server-side; the format gate lives here.
 fn valid_voice(v: &str) -> bool {
     if v.len() > 2048 || v.is_empty() {
         return false;
     }
     if v.starts_with("/voice/") && !v.contains("..") {
-        return v.to_lowercase().ends_with(".mp3");
+        return has_voice_extension(v);
     }
     match url::Url::parse(v) {
-        Ok(p) => {
-            (p.scheme() == "http" || p.scheme() == "https")
-                && p.path().to_lowercase().ends_with(".mp3")
-        }
+        Ok(p) => (p.scheme() == "http" || p.scheme() == "https") && has_voice_extension(p.path()),
         Err(_) => false,
     }
 }
@@ -109,7 +116,10 @@ pub fn validate_drop(r: &RawDrop) -> Result<ValidatedDrop, Vec<String>> {
     }
     let voice_url = r.voice_url.trim().to_string();
     if !valid_voice(&voice_url) {
-        errs.push("voice_url must be an mp3 (/voice/... path or http(s) URL)".into());
+        errs.push(
+            "voice_url must be an mp3, ogg, webm or m4a file (/voice/... path or http(s) URL)"
+                .into(),
+        );
     }
     let tb = r.time_bucket.trim().to_uppercase();
     if !matches!(tb.as_str(), "S" | "M" | "L") {
@@ -329,6 +339,24 @@ mod tests {
         // Uppercase extension on remote URLs is fine.
         ok.voice_url = "https://x.com/a.MP3".into();
         assert!(validate_drop(&ok).is_ok());
+    }
+
+    #[test]
+    fn voice_accepts_browser_recording_formats() {
+        let mut v = good();
+        for ok in [
+            "/voice/a.ogg",
+            "/voice/a.webm",
+            "/voice/a.m4a",
+            "https://x.com/a.WEBM",
+        ] {
+            v.voice_url = ok.into();
+            assert!(validate_drop(&v).is_ok(), "{ok} must pass");
+        }
+        for bad in ["/voice/a.wav", "/voice/a.mp4", "https://x.com/a.ogg.exe"] {
+            v.voice_url = bad.into();
+            assert!(validate_drop(&v).is_err(), "{bad} must fail");
+        }
     }
 
     #[test]
