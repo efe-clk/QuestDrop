@@ -171,7 +171,7 @@ Her `QuestCard`'da "⋯" menüsü → "Şikâyet et" → küçük bir dialog (se
 
 ## 6. Ses notu (en riskli parça)
 
-**Sorun:** backend sadece **mp3** kabul ediyor (magic byte + `.mp3` uzantısı). Tarayıcılar ise yerleşik kayıtta mp3 üretmiyor: Chrome/Firefox Opus'u webm/ogg içinde, Safari AAC'yi mp4 içinde kaydediyor ([MDN `isTypeSupported`](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/isTypeSupported_static), [addpipe](https://blog.addpipe.com/recording-audio-in-the-browser-using-pure-html5-and-minimal-javascript)). Tarayıcıdan kayıt yapılıp doğrudan yüklenirse sunucu 400 döner.
+**Durum (2026-10-12): A seçeneğiyle çözüldü.** Backend artık mp3, ogg, webm ve m4a kabul ediyor. Bağlam için asıl sorun: backend sadece **mp3** kabul ediyordu (magic byte + `.mp3` uzantısı). Tarayıcılar ise yerleşik kayıtta mp3 üretmiyor: Chrome/Firefox Opus'u webm/ogg içinde, Safari AAC'yi mp4 içinde kaydediyor ([MDN `isTypeSupported`](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/isTypeSupported_static), [addpipe](https://blog.addpipe.com/recording-audio-in-the-browser-using-pure-html5-and-minimal-javascript)). Tarayıcıdan kayıt yapılıp doğrudan yüklenince sunucu 400 dönüyordu.
 
 Seçenekler:
 
@@ -181,7 +181,7 @@ Seçenekler:
 | B | Tarayıcıda mp3'e çevir (lamejs benzeri kütüphane) | Backend değişmez | ~150 KB ek JS, mobilde yavaş, bakımı zayıf kütüphaneler |
 | C | Sunucuda ffmpeg ile mp3'e çevir | İstemci basit | İmaj büyür, CPU, yeni saldırı yüzeyi |
 
-**Öneri: A.** Arayüz `MediaRecorder.isTypeSupported()` ile `audio/webm;codecs=opus` → `audio/ogg;codecs=opus` → `audio/mp4` sırasıyla dener. Dosya yükleme seçeneği her zaman açık kalır (hazır ses dosyası olanlar için).
+**Seçilen: A.** Arayüz `MediaRecorder.isTypeSupported()` ile `audio/webm;codecs=opus` → `audio/ogg;codecs=opus` → `audio/mp4` sırasıyla dener. Dosya yükleme seçeneği her zaman açık kalır (hazır ses dosyası olanlar için).
 
 **Kaydedici bileşeni:**
 - Büyük yuvarlak "Kaydet" butonu, kayıt sırasında süre sayacı ve ses seviyesi çubuğu.
@@ -258,17 +258,17 @@ HTMX 4xx/5xx cevaplarını varsayılan olarak sayfaya basmaz. Arayüz handler'la
 
 | # | İş | Neden | Büyüklük |
 |---|---|---|---|
-| 1 | `/login` sayfası (GET token'ı gösterir, POST tüketir) | e-postadaki link bugün 404 | küçük |
-| 2 | Havuz ve eşleşme öğelerine `offer_id` | takas teklif id'siyle yapılıyor | küçük (sorguya join) |
-| 3 | "Açık/verdiğim quest'lerim" sorgusu (`/v1/me/offers` + `db` fonksiyonu) | `/take` ve `/revive` sekme 2 için şart | küçük |
+| 1 | ✅ Backend kısmı bitti: `LOGIN_URL`'i arayüzün login sayfasına ayarla. Sayfanın kendisi (GET token'ı gösterir, POST tüketir) arayüz işi | e-postadaki link onu açmalı | küçük |
+| 2 | ✅ Havuz ve eşleşme öğelerinde `offer_id` | takas teklif id'siyle yapılıyor | bitti |
+| 3 | ✅ `GET /v1/me/offers?status=` | `/take` ve `/revive` sekme 2 için şart | bitti |
 | 4 | (Sadece ayrı origin SPA seçilirse) credentials'lı CORS | aynı binary'de gerekmez | küçük |
-| 5 | Ses formatı: Opus/AAC kabulü (§6, seçenek A) | tarayıcıdan kayıt | orta |
+| 5 | ✅ Ses formatı: mp3, ogg, webm, m4a (§6, seçenek A) | tarayıcıdan kayıt | bitti |
 | 6 | Tekil quest sorgusu (`/q/{id}` için) | paylaşılabilir sayfa | küçük |
 | 7 | `/match` ve `/revive` arayüzde oturumdan gelen kullanıcıyla çağrılır; REST tarafı login'e bağlanır | design §6'daki gizlilik açığı | küçük |
 | 8 | Bırakmayı login'e bağla (§5.2 kararı) | başkası adına bırakma açığı | küçük; testler güncellenir |
 | 9 | Ana sayfa şablonundaki `/v1/match` linkini kaldır | `user_id`'siz 400 veriyor | çok küçük |
 
-1, 2, 3 ve 5 yapılmadan çekirdek döngü (bırak → eşleş → al) tarayıcıda tamamlanamaz.
+1, 2, 3 ve 5 bittiği için (2026-10-12) arayüz yazılınca çekirdek döngü (bırak → eşleş → al) mümkün. §5.2 kararı için madde 8 hâlâ gerekli.
 
 ---
 
@@ -299,7 +299,7 @@ Her dilim kendi başına yayınlanabilir:
 ## 13. Açık sorular
 
 1. Bırakma login'e bağlansın mı? (Bu doküman evet varsayıyor, §5.2.)
-2. Ses formatı: backend genişletilsin mi (A) yoksa istemcide mp3'e mi çevrilsin (B)? (Öneri: A, §6.)
+2. ~~Ses formatı~~: karar verildi ve yapıldı (A, §6).
 3. Harici ses linkleri tamamen kapatılsın mı?
 4. v1 dili: sadece İngilizce mi, İngilizce + Türkçe mi? (Öneri: ikisi, sözlük dosyasıyla.)
 5. Takas edilen quest'in yeni sahibine bırakanla iletişim kanalı olacak mı? Bugün yok (DM kapsam dışı). Bırakanın handle'ı görünüyor ama ulaşma yolu yok.

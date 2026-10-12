@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PoolItem {
     pub id: String,
+    /// The project's OPEN swap offer: what POST /v1/swaps takes.
+    pub offer_id: String,
     pub skill_needed: Vec<String>,
     pub time_bucket: String,
     pub energy: String,
@@ -24,6 +26,7 @@ pub struct QuestUser {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankedItem {
     pub id: String,
+    pub offer_id: String,
     pub skill_needed: Vec<String>,
     pub time_bucket: String,
     pub energy: String,
@@ -70,6 +73,7 @@ impl Matcher for RuleMatcher {
                 let score = ((fit * 0.8 + rand_v * 0.2) * 100.0).round() / 100.0;
                 RankedItem {
                     id: p.id.clone(),
+                    offer_id: p.offer_id.clone(),
                     skill_needed: p.skill_needed.clone(),
                     time_bucket: p.time_bucket.clone(),
                     energy: p.energy.clone(),
@@ -162,6 +166,7 @@ impl Matcher for EmbeddingMatcher {
                 let cos = Self::cosine(&uvec, &self.embed(&Self::item_text(p)));
                 RankedItem {
                     id: p.id.clone(),
+                    offer_id: p.offer_id.clone(),
                     skill_needed: p.skill_needed.clone(),
                     time_bucket: p.time_bucket.clone(),
                     energy: p.energy.clone(),
@@ -183,6 +188,7 @@ mod tests {
     fn item(id: &str, skills: &[&str]) -> PoolItem {
         PoolItem {
             id: id.into(),
+            offer_id: format!("offer-{id}"),
             skill_needed: skills.iter().map(|s| s.to_string()).collect(),
             time_bucket: "S".into(),
             energy: "LOW".into(),
@@ -208,6 +214,8 @@ mod tests {
         let out = m.match_items(&user, &pool);
         assert!(out.iter().all(|r| r.id != "u1"));
         assert!(out.len() <= 4);
+        // The offer id travels with each item so a client can swap it.
+        assert!(out.iter().all(|r| r.offer_id == format!("offer-{}", r.id)));
         // top-3 ordered, surprise last — scores of first three non-increasing
         if out.len() >= 3 {
             assert!(out[0].score >= out[1].score && out[1].score >= out[2].score);

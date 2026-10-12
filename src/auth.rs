@@ -369,21 +369,42 @@ pub fn mailer_from_env() -> Box<dyn Mailer> {
     }
 }
 
+/// Emailed login link. LOGIN_URL points at the client page that POSTs the
+/// token to /v1/auth/callback (e.g. a web UI on its own route or origin);
+/// without it the link is BASE_URL/login.
 pub fn login_link(token: &str) -> String {
-    login_link_next(token, None)
+    build_login_link(
+        std::env::var("BASE_URL").ok().as_deref(),
+        std::env::var("LOGIN_URL").ok().as_deref(),
+        token,
+    )
 }
 
 /// Login link that returns the user to `next` (a site-relative path the
-/// caller already validated) after the token is redeemed.
+/// caller already validated) once the token is redeemed.
 pub fn login_link_next(token: &str, next: Option<&str>) -> String {
-    let base = std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
-    let mut link = format!("{}/login?token={token}", base.trim_end_matches('/'));
+    let mut link = login_link(token);
     if let Some(n) = next {
         let enc: String = url::form_urlencoded::byte_serialize(n.as_bytes()).collect();
         link.push_str("&next=");
         link.push_str(&enc);
     }
     link
+}
+
+fn build_login_link(base_url: Option<&str>, login_url: Option<&str>, token: &str) -> String {
+    let page = match login_url.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(u) => u.to_string(),
+        None => format!(
+            "{}/login",
+            base_url
+                .unwrap_or("http://localhost:3000")
+                .trim_end_matches('/')
+        ),
+    };
+    // Tokens are URL-safe base64 without padding, so no escaping is needed.
+    let sep = if page.contains('?') { '&' } else { '?' };
+    format!("{page}{sep}token={token}")
 }
 
 #[cfg(test)]
@@ -400,6 +421,35 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
         mac.update(sid.to_string().as_bytes());
         assert!(mac.verify_slice(&hex_decode("00").unwrap()).is_err());
+    }
+
+    #[test]
+    fn login_link_prefers_login_url() {
+        assert_eq!(
+            build_login_link(Some("https://qd.example/"), None, "tok"),
+            "https://qd.example/login?token=tok"
+        );
+        assert_eq!(
+            build_login_link(None, None, "tok"),
+            "http://localhost:3000/login?token=tok"
+        );
+        assert_eq!(
+            build_login_link(
+                Some("https://api.example"),
+                Some("https://app.example/auth"),
+                "tok"
+            ),
+            "https://app.example/auth?token=tok"
+        );
+        assert_eq!(
+            build_login_link(None, Some("https://app.example/auth?lang=tr"), "tok"),
+            "https://app.example/auth?lang=tr&token=tok"
+        );
+        assert_eq!(
+            build_login_link(Some("https://qd.example"), Some("  "), "tok"),
+            "https://qd.example/login?token=tok",
+            "blank LOGIN_URL falls back"
+        );
     }
 
     #[test]

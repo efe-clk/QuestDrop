@@ -1152,6 +1152,7 @@ pub async fn match_page(
             &user,
             &matcher::PoolItem {
                 id: String::new(),
+                offer_id: String::new(),
                 skill_needed: row.skill_needed.clone(),
                 time_bucket: String::new(),
                 energy: String::new(),

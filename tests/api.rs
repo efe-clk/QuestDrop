@@ -1610,3 +1610,151 @@ async fn db_down_503() {
     let (status, _) = post_drop_ck(&app, None, drop_json("erin_7", "erin7@x.com", "Nope")).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
+
+async fn get_json(
+    app: &axum::Router,
+    uri: &str,
+    cookie: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut b = Request::builder().uri(uri);
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("qd_session={c}"));
+    }
+    let res = app
+        .clone()
+        .oneshot(b.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// A client can complete a swap using only API responses: pool/match items
+/// carry the offer to take, /v1/me/offers lists the offer to give.
+#[tokio::test]
+async fn offer_ids_flow_from_pool_match_and_me_into_swap() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+
+    let (s, a) = post_drop(&app, &pool, drop_json("offer_a", "offa@x.com", "Quest A")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, b) = post_drop(&app, &pool, drop_json("offer_b", "offb@x.com", "Quest B")).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (a_offer, b_offer) = (a["offer_id"].clone(), b["offer_id"].clone());
+
+    // Pool items expose the same offer ids the drops returned.
+    let (s, p) = get_json(&app, "/v1/projects", None).await;
+    assert_eq!(s, StatusCode::OK);
+    for item in p["pool"].as_array().unwrap() {
+        let want = if item["title"] == "Quest A" {
+            &a_offer
+        } else {
+            &b_offer
+        };
+        assert_eq!(&item["offer_id"], want, "pool item: {item}");
+    }
+
+    // /v1/me/offers: login required, status filter validated.
+    let ck = login(&app, &pool, "offb@x.com", Some("offer_b")).await;
+    assert_eq!(
+        get_json(&app, "/v1/me/offers", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (s, _) = get_json(&app, "/v1/me/offers?status=nope", Some(&ck)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, mine) = get_json(&app, "/v1/me/offers?status=open", Some(&ck)).await;
+    assert_eq!(s, StatusCode::OK);
+    let mine = mine["offers"].as_array().unwrap().clone();
+    assert_eq!(mine.len(), 1, "only B's own offer");
+    assert_eq!(mine[0]["offer_id"], b_offer);
+    assert_eq!(mine[0]["offer_status"], "OPEN");
+    assert_eq!(mine[0]["title"], "Quest B");
+
+    // Match for B offers A's quest, carrying A's offer id.
+    let (s, me) = get_json(&app, "/v1/me", Some(&ck)).await;
+    assert_eq!(s, StatusCode::OK);
+    let b_uid = me["user_id"].as_str().unwrap().to_string();
+    // Match is login-bound (web-ui §10.7): the session decides whose matches.
+    let (s, _) = get_json(&app, &format!("/v1/match?user_id={b_uid}"), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, m) = get_json(&app, &format!("/v1/match?user_id={b_uid}"), Some(&ck)).await;
+    assert_eq!(s, StatusCode::OK);
+    let matches = m["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["offer_id"], a_offer);
+
+    // Swap built purely from those responses.
+    let (s, body, _) = post_swap(
+        &app,
+        swap_json(
+            &b_uid,
+            mine[0]["offer_id"].as_str().unwrap(),
+            matches[0]["offer_id"].as_str().unwrap(),
+        ),
+        None,
+        Some(&ck),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "body: {body}");
+
+    let (_, after) = get_json(&app, "/v1/me/offers", Some(&ck)).await;
+    assert_eq!(after["offers"][0]["offer_status"], "MATCHED");
+    let (_, open) = get_json(&app, "/v1/me/offers?status=OPEN", Some(&ck)).await;
+    assert_eq!(open["offers"].as_array().unwrap().len(), 0);
+    let (_, p) = get_json(&app, "/v1/projects", None).await;
+    assert_eq!(p["pool"].as_array().unwrap().len(), 0, "both left the pool");
+}
+
+/// Browser recordings (Ogg/WebM Opus, M4A AAC) upload and can be dropped.
+#[tokio::test]
+async fn voice_upload_accepts_browser_formats() {
+    let _g = lock().await;
+    let pool = test_pool().await;
+    clean(&pool).await;
+    let app = build_app(Some(pool.clone()));
+    let ck = login(&app, &pool, "fmt@x.com", Some("fmt_u")).await;
+
+    let cases: [(&[u8], &str, &str); 3] = [
+        (b"OggS\x00\x02\x00\x00\x00\x00", "audio/ogg", "ogg"),
+        (b"\x1A\x45\xDF\xA3\x9F\x42\x86\x81", "audio/webm", "webm"),
+        (b"\x00\x00\x00\x20ftypM4A \x00\x00", "audio/mp4", "m4a"),
+    ];
+    let mut urls = Vec::new();
+    for (magic, ctype, ext) in cases {
+        let mut data = magic.to_vec();
+        data.extend_from_slice(&[0u8; 128]);
+        let (ct, body) = multipart_file("file", "rec.bin", ctype, &data);
+        let (s, j) = post_voice(&app, ct, body, Some(&ck)).await;
+        assert_eq!(s, StatusCode::CREATED, "{ext}: {j}");
+        let url = j["voice_url"].as_str().unwrap().to_string();
+        assert!(url.ends_with(&format!(".{ext}")), "{url}");
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{url} must be served");
+        urls.push(url);
+    }
+
+    // WAV is still refused.
+    let (ct, body) = multipart_file(
+        "file",
+        "a.wav",
+        "audio/wav",
+        b"RIFF\x00\x00\x00\x00WAVEfmt ",
+    );
+    assert_eq!(
+        post_voice(&app, ct, body, Some(&ck)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    // A drop accepts the uploaded ogg as its voice note.
+    let mut d = drop_json("fmt_u", "fmt@x.com", "Ogg quest");
+    d["voice_url"] = serde_json::Value::String(urls[0].clone());
+    let (s, j) = post_drop(&app, &pool, d).await;
+    assert_eq!(s, StatusCode::CREATED, "body: {j}");
+}

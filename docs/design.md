@@ -30,14 +30,14 @@ Single repo, API-first modular monolith. No microservices.
 - Matching is one trait: `trait Matcher { fn match_items(user, pool) -> Vec<RankedItem> }`.
 - Events: DB outbox table (`outbox_events`), polled by the `bot` binary.
 - Auth: email magic link + server-side sessions (§4).
-- Files: link only (no S3). Voice: mp3, either uploaded to `/v1/voice` or an external http(s) URL ending in `.mp3`.
+- Files: link only (no S3). Voice: mp3, ogg, webm or m4a, either uploaded to `/v1/voice` or an external http(s) URL ending in one of those extensions.
 
 ## 4. Components + Data Model
 
 1. **users**: `id, handle (unique), email (unique), can_do[], looking_for[]`. A user is created on first login.
 2. **projects** (freeze package): `title (3-80), one_liner (10-200), link_url, voice_url, skill_needed[] (max 10, each 1-32), time_bucket S|M|L, energy LOW|MID|HIGH, status OPEN|MATCHED|CLOSED, giver_id, embedding JSONB (unused placeholder)`.
    - `time_bucket` means S = under 2 h, M = 2-8 h, L = over 8 h.
-3. **swap_offers**: `project_id, giver_id, status OPEN|MATCHED|CLOSED`. Each drop creates exactly one offer. **Swaps work on offer ids, not project ids.**
+3. **swap_offers**: `project_id, giver_id, status OPEN|MATCHED|CLOSED`. Each drop creates exactly one offer. **Swaps work on offer ids, not project ids.** Pool and match items carry the `offer_id`; `GET /v1/me/offers` lists the caller's own.
 4. **matches**: `taker_id, given_id, taken_id (project ids), score, reason`.
 5. **reports**: `project_id, reporter_id, reason (10-300)`, one per reporter per project.
 6. **magic_tokens** (SHA-256 hash only, 15 min, single use) and **sessions** (30 days).
@@ -48,7 +48,7 @@ Out of scope: comments, likes, DMs, scores, category tree.
 ### Identity rules
 
 - A drop needs login; the giver is the session user. A body that names another `handle`/`email` gets 403.
-- Login: `POST /v1/auth/request` stores a token and sends `BASE_URL/login?token=…`. The `/login` page shows a button that redeems the token (never on GET, so mail-client prefetches cannot burn it) and sets the `qd_session` cookie (`HttpOnly; SameSite=Lax`, plus `Secure` when `BASE_URL` is https).
+- Login: `POST /v1/auth/request` stores a token and sends `LOGIN_URL?token=…` (default `BASE_URL/login`). The web UI's `/login` page shows a button that redeems the token (never on GET, so mail-client prefetches cannot burn it) and sets the `qd_session` cookie (`HttpOnly; SameSite=Lax`, plus `Secure` when `BASE_URL` is https).
 - Swaps, reports, profile edits and voice uploads need a session, and the body ids must match the session user (else 403).
 
 ## 5. Data Flow
@@ -71,15 +71,15 @@ Out of scope: comments, likes, DMs, scores, category tree.
 
 ### Known limitations (2026-10-12)
 
-- Voice duration (meant to be 10-60 s) is **not** checked. Only format (magic bytes / `.mp3`) and size (5 MB) are.
 - (Fixed 2026-10-12) `/v1/match` and `/v1/revive` used to take any `user_id` without login, and drops needed none either. All three now require the session user.
+- Voice duration (meant to be 10-60 s) is **not** checked server-side; the web recorder enforces it. The server checks format (magic bytes: mp3, Ogg, WebM, ISO-BMFF `ftyp`; the codec inside is not inspected) and size (5 MB).
 - The rate limiter is in memory and per process (resets on restart, not shared across instances). It trusts the leftmost `X-Forwarded-For` value.
 - The event name `swap.created` is emitted for a **drop**, not a swap. Rename it before external consumers depend on it.
 
 ## 7. Tests
 
-- Unit (16): validation, matcher ordering and range, auth helpers, first task, Discord body.
-- Integration (29, real Postgres): drop/pool/cap, swap atomicity and races (5 parallel same-key requests give 1×201 + 4×200), idempotency, reports and auto-hide, auth and cookies, voice upload, error shapes.
+- Unit (19): validation (incl. voice formats), matcher ordering and range, audio sniffing, auth helpers and login link, first task, Discord body.
+- Integration (31, real Postgres): drop/pool/cap, swap atomicity and races (5 parallel same-key requests give 1×201 + 4×200), idempotency, reports and auto-hide, auth and cookies, voice upload (mp3/ogg/webm/m4a), offer ids from pool/match/`/v1/me/offers` into a swap, error shapes.
 - E2E through a browser: not possible until the web UI exists. No load test.
 
 ## 8. B/C Extension Ports

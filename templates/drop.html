@@ -91,7 +91,7 @@
       <div class="rec__file" data-rec-file{% if !voice_url.is_empty() %} hidden{% endif %}>
         <label class="help rec__or" for="f-voice-file" data-rec-or hidden>{{ c.t("rec.or_upload") }}</label>
         <label class="label label--sm" for="f-voice-file" data-rec-file-label>{{ c.t("rec.upload_label") }}</label>
-        <input class="file" id="f-voice-file" name="voice_file" type="file" accept="audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/mp4,audio/x-m4a,.mp3,.ogg,.opus,.webm,.m4a">
+        <input class="file" id="f-voice-file" name="voice_file" type="file" accept="audio/mpeg,audio/mp3,audio/ogg,audio/webm,audio/mp4,audio/x-m4a,.mp3,.ogg,.webm,.m4a">
       </div>
       <progress class="rec__progress" max="100" value="0" data-rec-progress hidden></progress>
       <p class="rec__status" data-rec-status role="status" aria-live="polite"></p>

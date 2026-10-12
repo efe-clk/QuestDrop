@@ -14,7 +14,7 @@ Success criterion: strangers trading in the open pool.
 | B: outbox publisher + `bot` binary (log / Discord webhook) | Done |
 | C: `EmbeddingMatcher` (local trigram + cosine, `?algo=embedding`) | Done |
 | Web UI (Askama + HTMX, English + Turkish) | Done: pool, login, drop with in-browser voice recording, match, swap, revive, profile, report |
-| Tests | 59 Rust tests green (22 unit + 29 API + 8 web) plus a Playwright browser E2E |
+| Tests | 64 Rust tests green (25 unit + 31 API + 8 web) plus a Playwright browser E2E |
 | Deploy | **Not deployed.** `Dockerfile` and `fly.toml` are ready. |
 
 The web UI follows [docs/web-ui.md](./docs/web-ui.md); every page works without JavaScript and HTMX only speeds it up.
@@ -37,7 +37,7 @@ Single repo, API-first modular monolith in Rust. No microservices.
 - The core knows nothing about the outside world. A web UI and any future client use the same REST API (`/v1/`).
 - Matching is one trait: `trait Matcher { fn match_items(user, pool) -> Vec<RankedItem> }`, with two implementations: `RuleMatcher` (default) and `EmbeddingMatcher`.
 - Events go through an outbox table (`outbox_events`). A drop writes `swap.created` and a completed swap writes `swap.completed`. The `bot` binary delivers them.
-- Auth: email magic link + HMAC-signed session cookie. Files: link only (no S3). Voice: mp3, Opus (webm/ogg) or AAC (m4a) under `VOICE_DIR`.
+- Auth: email magic link + HMAC-signed session cookie. Files: link only (no S3). Voice: mp3, ogg, webm or m4a under `VOICE_DIR`.
 
 Details: [docs/design.md](./docs/design.md) · [docs/stack.md](./docs/stack.md) · [docs/plan.md](./docs/plan.md) · [docs/web-ui.md](./docs/web-ui.md) · API contract: [docs/openapi.yaml](./docs/openapi.yaml)
 
@@ -53,7 +53,7 @@ Login means a valid `qd_session` cookie. Every POST except `auth/callback` and `
 | GET | `/drop`, `/match`, `/take/{offer_id}`, `/revive`, `/me` | ✔ | web UI pages (HTML; logged out → `/login?next=…`) |
 | GET | `/health` | – | always 200, `{"status":"ok","db":"up"\|"down"}` |
 | GET | `/ready` | – | 200 when the DB answers, else 503 |
-| GET | `/v1/projects?cursor=&limit=` | – | OPEN pool, newest first, cursor pages (default 20, max 50) |
+| GET | `/v1/projects?cursor=&limit=` | – | OPEN pool, newest first, cursor pages (default 20, max 50); items carry `offer_id` |
 | GET | `/v1/projects/{id}` | – | one project (OPEN or MATCHED) |
 | POST | `/v1/projects` | ✔ | drop a quest as the session user; max 3 per giver in any 24 h |
 | POST | `/v1/users/upsert` | ✔ | your own skill profile (`can_do`, `looking_for`) |
@@ -65,8 +65,8 @@ Login means a valid `qd_session` cookie. Every POST except `auth/callback` and `
 | POST | `/v1/auth/callback` | – | redeems the token and sets the session cookie (30 days) |
 | POST | `/v1/auth/logout` | – | deletes the session (idempotent) |
 | GET | `/v1/me` | ✔ | session identity |
-| GET | `/v1/me/offers` | ✔ | your drops with status; OPEN ones carry `offer_id` |
-| POST | `/v1/voice` | ✔ | voice upload: mp3, ogg/webm (Opus) or m4a (AAC); multipart field `file`, 5 MB cap |
+| GET | `/v1/me/offers?status=` | ✔ | your own offers (pick what to give in a swap); `status` = open, matched or closed |
+| POST | `/v1/voice` | ✔ | audio upload: mp3, ogg, webm or m4a (multipart field `file`, 5 MB cap) |
 | GET | `/voice/*` | – | stored voice files |
 
 Errors use RFC 9457 problem JSON. Unknown paths return a JSON 404, a wrong method returns a JSON 405, and a trailing slash redirects with 308.
@@ -105,6 +105,7 @@ Browser E2E (Playwright, needs a running server and a fresh database): see [e2e/
 | `VOICE_QUOTA_MB` | `500` | uploads are refused (507) once the directory reaches this size |
 | `SESSION_SECRET` | random per boot | at least 16 chars; required in production or sessions die on restart |
 | `BASE_URL` | `http://localhost:3000` | base of login links; `https://` adds the `Secure` cookie flag |
+| `LOGIN_URL` | `BASE_URL/login` | page the emailed link opens (`?token=` is appended); point it at the UI's login page |
 | `SMTP_URL` / `MAIL_FROM` | – / `questdrop@localhost` | real mail; unset = log mailer |
 | `RUST_LOG` | `questdrop=warn,tower_http=warn` | log filter |
 | `BOT_SINK` / `BOT_WEBHOOK_URL` | `log` / – | bot only: `webhook` posts to a Discord webhook |

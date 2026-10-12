@@ -14,7 +14,7 @@ Başarı kriteri: tanımadığın insanların açık havuzda takas yapması.
 | B: outbox publisher + `bot` binary (log / Discord webhook) | Bitti |
 | C: `EmbeddingMatcher` (yerel trigram + kosinüs, `?algo=embedding`) | Bitti |
 | Web arayüzü (Askama + HTMX, Türkçe + İngilizce) | Bitti: havuz, giriş, tarayıcıdan ses kaydıyla bırakma, eşleşme, takas, canlandırma, profil, şikâyet |
-| Testler | 59 Rust testi yeşil (22 birim + 29 API + 8 web) ve Playwright tarayıcı E2E'si |
+| Testler | 64 Rust testi yeşil (25 birim + 31 API + 8 web) ve Playwright tarayıcı E2E'si |
 | Deploy | **Yayında değil.** `Dockerfile` ve `fly.toml` hazır. |
 
 Web arayüzü [docs/web-ui.tr.md](./docs/web-ui.tr.md)'yi izler; her sayfa JavaScript olmadan çalışır, HTMX sadece hızlandırır.
@@ -37,7 +37,7 @@ Tek repo, Rust ile API-first modüler monolit. Mikroservis yok.
 - Core dış dünyayı bilmez. Web arayüzü de gelecekteki diğer istemciler de aynı REST'i kullanır (`/v1/`).
 - Eşleşme tek trait'tir: `trait Matcher { fn match_items(user, pool) -> Vec<RankedItem> }`. İki uygulaması var: `RuleMatcher` (varsayılan) ve `EmbeddingMatcher`.
 - Olaylar bir outbox tablosundan (`outbox_events`) geçer. Bırakma `swap.created`, tamamlanan takas `swap.completed` yazar. Bunları `bot` binary'si iletir.
-- Auth: e-posta magic link + HMAC imzalı oturum cookie'si. Dosya: sadece link (S3 yok). Ses: `VOICE_DIR` altında mp3, Opus (webm/ogg) ya da AAC (m4a).
+- Auth: e-posta magic link + HMAC imzalı oturum cookie'si. Dosya: sadece link (S3 yok). Ses: `VOICE_DIR` altında mp3, ogg, webm ya da m4a.
 
 Detay: [docs/design.tr.md](./docs/design.tr.md) · [docs/stack.tr.md](./docs/stack.tr.md) · [docs/plan.tr.md](./docs/plan.tr.md) · [docs/web-ui.tr.md](./docs/web-ui.tr.md) · API sözleşmesi: [docs/openapi.yaml](./docs/openapi.yaml)
 
@@ -53,7 +53,7 @@ Login, geçerli bir `qd_session` cookie'si demek. `auth/callback` ve `auth/logou
 | GET | `/drop`, `/match`, `/take/{offer_id}`, `/revive`, `/me` | ✔ | web arayüzü sayfaları (HTML; oturumsuz → `/login?next=…`) |
 | GET | `/health` | – | her zaman 200, `{"status":"ok","db":"up"\|"down"}` |
 | GET | `/ready` | – | DB cevap verirse 200, yoksa 503 |
-| GET | `/v1/projects?cursor=&limit=` | – | OPEN havuz, yeniden eskiye, cursor sayfalı (varsayılan 20, max 50) |
+| GET | `/v1/projects?cursor=&limit=` | – | OPEN havuz, yeniden eskiye, cursor sayfalı (varsayılan 20, max 50); öğelerde `offer_id` var |
 | GET | `/v1/projects/{id}` | – | tek proje (OPEN ya da MATCHED) |
 | POST | `/v1/projects` | ✔ | oturumdaki kullanıcı olarak quest bırak; herhangi bir 24 saatte bırakan başına max 3 |
 | POST | `/v1/users/upsert` | ✔ | kendi yetenek profilin (`can_do`, `looking_for`) |
@@ -65,8 +65,8 @@ Login, geçerli bir `qd_session` cookie'si demek. `auth/callback` ve `auth/logou
 | POST | `/v1/auth/callback` | – | token'ı kullanır, oturum cookie'sini kurar (30 gün) |
 | POST | `/v1/auth/logout` | – | oturumu siler (idempotent) |
 | GET | `/v1/me` | ✔ | oturum kimliği |
-| GET | `/v1/me/offers` | ✔ | bıraktıkların ve durumları; OPEN olanlar `offer_id` taşır |
-| POST | `/v1/voice` | ✔ | ses yükleme: mp3, ogg/webm (Opus) ya da m4a (AAC); multipart alanı `file`, 5 MB sınır |
+| GET | `/v1/me/offers?status=` | ✔ | kendi tekliflerin (takasta ne vereceğini seçmek için); `status` = open, matched ya da closed |
+| POST | `/v1/voice` | ✔ | ses yükleme: mp3, ogg, webm ya da m4a (multipart alanı `file`, 5 MB sınır) |
 | GET | `/voice/*` | – | kayıtlı ses dosyaları |
 
 Hatalar RFC 9457 problem JSON'u. Bilinmeyen yol JSON 404, yanlış metod JSON 405 döner; sondaki `/` 308 ile yönlenir.
@@ -105,6 +105,7 @@ Tarayıcı E2E'si (Playwright, çalışan bir sunucu ve temiz bir veritabanı is
 | `VOICE_QUOTA_MB` | `500` | klasör bu boyuta ulaşınca yükleme reddedilir (507) |
 | `SESSION_SECRET` | her açılışta rastgele | en az 16 karakter; production'da şart, yoksa yeniden başlatınca oturumlar düşer |
 | `BASE_URL` | `http://localhost:3000` | login linklerinin tabanı; `https://` ise cookie'ye `Secure` eklenir |
+| `LOGIN_URL` | `BASE_URL/login` | e-postadaki linkin açtığı sayfa (`?token=` eklenir); arayüzün login sayfasına yönlendir |
 | `SMTP_URL` / `MAIL_FROM` | – / `questdrop@localhost` | gerçek e-posta; yoksa log mailer |
 | `RUST_LOG` | `questdrop=warn,tower_http=warn` | log filtresi |
 | `BOT_SINK` / `BOT_WEBHOOK_URL` | `log` / – | sadece bot: `webhook` Discord webhook'una yollar |

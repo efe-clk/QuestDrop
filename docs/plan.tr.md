@@ -3,7 +3,7 @@
 # QuestDrop — Rust Yapım Planı
 
 Durum (2026-10-12): **Backend ve web arayüzü bitti, yayında değil.**
-Faz 0-5 ile B ve C yazıldı: API ve üstündeki tarayıcı sayfaları (59 Rust testi + tarayıcı E2E'si, hepsi yeşil).
+Faz 0-5 ile B ve C yazıldı: API ve üstündeki tarayıcı sayfaları (64 Rust testi + tarayıcı E2E'si, hepsi yeşil).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Tek binary, `/v1/` REST.
 
@@ -58,7 +58,7 @@ Aynı binary içinde server-render Askama + HTMX sayfaları (`src/web.rs`, `temp
 
 Sayfalar: `/` havuz (cursor ile "daha fazla göster"), `/login` (+ `?token=` onay butonu), `/drop` (tarayıcıdan kayıt + dosya yükleme), `/match`, `/take/{offer_id}`, `/revive` (aldıklarım / bıraktıklarım, ilk 2 dakika), `/me`, `/q/{id}` (paylaşılabilir, Open Graph), kartlarda şikâyet menüsü, çıkış. İngilizce + Türkçe (`i18n/*.toml`).
 
-Bunun için kapatılan API eksikleri (web-ui §10): `/login` sayfası; havuz, eşleşme ve proje satırlarında `offer_id`; `GET /v1/me/offers`; `GET /v1/projects/{id}`; ses mp3'ün yanında Opus (webm/ogg) ve AAC (m4a) kabul eder; bırakma, `/v1/match` ve `/v1/revive` login ister; ölü `/v1/match` linki kaldırıldı. CORS gerekmiyor (aynı origin).
+Bunun için kapatılan API eksikleri (web-ui §10): `/login` sayfası (link hedefi `LOGIN_URL` ile ayarlanabilir); havuz, eşleşme ve proje satırlarında `offer_id`; `GET /v1/me/offers?status=`; `GET /v1/projects/{id}`; ses mp3'ün yanında Opus (webm/ogg) ve AAC (m4a) kabul eder; bırakma, `/v1/match` ve `/v1/revive` login ister; ölü `/v1/match` linki kaldırıldı. CORS gerekmiyor (aynı origin).
 
 Testler: `tests/web.rs` (sayfalar, giriş akışı, CSRF, bırakma validasyonu + günlük sınır + JS'siz yükleme, eşleş → al → canlandır, idempotent çift gönderim, yarış durumu, şikâyet + otomatik gizleme, sayfalama parçası, DB yok) ve `e2e/` (Playwright: iki kullanıcı, sahte mikrofonla kayıt, gerçek yarış, axe, 360/768/1280 açık/koyu ekran görüntüleri).
 

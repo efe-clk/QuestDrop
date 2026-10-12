@@ -3,7 +3,7 @@
 # QuestDrop — Rust Build Plan
 
 Status (2026-10-12): **Backend and web UI done, not deployed.**
-Phases 0-5 plus B and C are implemented: the API, and the browser pages on top of it (59 Rust tests + a browser E2E, all green).
+Phases 0-5 plus B and C are implemented: the API, and the browser pages on top of it (64 Rust tests + a browser E2E, all green).
 
 Stack: Axum + sqlx + Postgres + Askama/HTMX. Single binary, `/v1/` REST.
 
@@ -58,7 +58,7 @@ Server-rendered Askama + HTMX pages in the same binary (`src/web.rs`, `templates
 
 Pages: `/` pool (cursor "show more"), `/login` (+ `?token=` confirm button), `/drop` (browser recorder + file upload), `/match`, `/take/{offer_id}`, `/revive` (taken / dropped tabs, first 2 minutes), `/me`, `/q/{id}` (shareable, Open Graph), report menu on cards, logout. English + Turkish (`i18n/*.toml`).
 
-API gaps closed for it (web-ui §10): `/login` page; `offer_id` on pool, match and project rows; `GET /v1/me/offers`; `GET /v1/projects/{id}`; voice accepts Opus (webm/ogg) and AAC (m4a) next to mp3; drops, `/v1/match` and `/v1/revive` require login; the dead `/v1/match` link is gone. CORS stays unneeded (same origin).
+API gaps closed for it (web-ui §10): `/login` page (link target configurable with `LOGIN_URL`); `offer_id` on pool, match and project rows; `GET /v1/me/offers?status=`; `GET /v1/projects/{id}`; voice accepts Opus (webm/ogg) and AAC (m4a) next to mp3; drops, `/v1/match` and `/v1/revive` require login; the dead `/v1/match` link is gone. CORS stays unneeded (same origin).
 
 Tests: `tests/web.rs` (pages, login flow, CSRF, drop validation + cap + no-JS upload, match → take → revive, idempotent double submit, race state, report + auto-hide, pagination fragment, DB-down) and `e2e/` (Playwright: two users, fake-mic recording, real race, axe, 360/768/1280 light/dark screenshots).
 

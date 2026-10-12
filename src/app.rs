@@ -189,28 +189,7 @@ async fn match_pool(
                     .into_response();
                 }
             };
-            // Swaps are keyed by offer id: attach it to every match.
-            let ids: Vec<uuid::Uuid> = matches.iter().filter_map(|m| m.id.parse().ok()).collect();
-            let offers: std::collections::HashMap<String, Option<uuid::Uuid>> =
-                match db::projects_by_ids(pool, &ids).await {
-                    Ok(rows) => rows
-                        .into_iter()
-                        .map(|r| (r.id.to_string(), r.offer_id))
-                        .collect(),
-                    Err(e) => return db_error(e),
-                };
-            let out: Vec<serde_json::Value> = matches
-                .into_iter()
-                .map(|m| {
-                    let offer = offers.get(&m.id).copied().flatten();
-                    let mut v = serde_json::to_value(&m).unwrap_or_default();
-                    if let Some(o) = v.as_object_mut() {
-                        o.insert("offer_id".into(), serde_json::json!(offer));
-                    }
-                    v
-                })
-                .collect();
-            Json(serde_json::json!({ "matches": out })).into_response()
+            Json(serde_json::json!({ "matches": matches })).into_response()
         }
         Err(e) => db_error(e),
     }
@@ -575,22 +554,6 @@ pub(crate) fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Optio
         })
 }
 
-/// The session user's own drops (any status). OPEN ones carry `offer_id`,
-/// which is what `POST /v1/swaps` needs as `give_offer_id`.
-async fn my_offers(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let uid = match session_user(&s, &headers).await {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let Some(pool) = &s.pool else {
-        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
-    };
-    match db::my_quests(pool, uid).await {
-        Ok(list) => Json(serde_json::json!({ "offers": list })).into_response(),
-        Err(e) => db_error(e),
-    }
-}
-
 /// One project by id (any status) for shareable quest pages.
 async fn get_project(
     State(s): State<AppState>,
@@ -722,17 +685,61 @@ async fn me(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Respon
         Err(e) => db_error(DbError::Db(e)),
     }
 }
+#[derive(Deserialize)]
+struct MyOffersQuery {
+    status: Option<String>,
+}
+
+/// The session user's own offers (newest first), optionally `?status=open`
+/// (or matched/closed). A swap's give side is picked from this list.
+async fn my_offers(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    q: Result<Query<MyOffersQuery>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let uid = match session_user(&s, &headers).await {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let Some(pool) = &s.pool else {
+        return problem(StatusCode::SERVICE_UNAVAILABLE, "database unavailable").into_response();
+    };
+    let q = match q {
+        Ok(Query(q)) => q,
+        Err(e) => {
+            return problem(StatusCode::BAD_REQUEST, format!("invalid query: {e}")).into_response()
+        }
+    };
+    let status = match q.status.as_deref().map(|v| v.trim().to_uppercase()) {
+        None => None,
+        Some(v) if matches!(v.as_str(), "OPEN" | "MATCHED" | "CLOSED") => Some(v),
+        Some(_) => {
+            return problem(
+                StatusCode::BAD_REQUEST,
+                "status must be open, matched or closed",
+            )
+            .into_response();
+        }
+    };
+    match db::my_offers(pool, uid, status.as_deref()).await {
+        Ok(offers) => Json(serde_json::json!({ "offers": offers })).into_response(),
+        Err(e) => db_error(e),
+    }
+}
+
 /// Voice upload (session required): streams the "file" field, enforces a
-/// 5MB cap while reading (the global 2MB default is disabled for this
-/// route), sniffs magic bytes and stores under a random name with the
-/// sniffed extension so client filenames can never traverse. Browsers
-/// record Opus (webm/ogg) or AAC (mp4), so those are accepted next to mp3
-/// (web-ui §6, option A). Duration (10-60s) is enforced by the recorder.
+/// 5MB cap while reading (the global 2MB default is disabled for this route),
+/// sniffs the container from magic bytes, stores under a random name so
+/// client filenames can never traverse. Duration (10-60 s) is enforced by
+/// the web recorder, not here.
 pub(crate) const VOICE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
-/// File extension for a supported audio container, from its first bytes.
+/// File extension for a supported voice container, from its magic bytes.
+/// mp3 (ID3 or MPEG frame sync), Ogg (Opus/Vorbis, Firefox recordings),
+/// WebM/Matroska (Opus, Chrome recordings), ISO-BMFF `ftyp` (AAC, Safari
+/// recordings). The codec inside is not inspected.
 pub(crate) fn sniff_audio(head: &[u8]) -> Option<&'static str> {
-    if head.len() < 12 {
+    if head.len() < 4 {
         return None;
     }
     if &head[0..3] == b"ID3" || (head[0] == 0xFF && head[1] & 0xE0 == 0xE0) {
@@ -744,7 +751,7 @@ pub(crate) fn sniff_audio(head: &[u8]) -> Option<&'static str> {
     if head[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
         return Some("webm");
     }
-    if &head[4..8] == b"ftyp" {
+    if head.len() >= 8 && &head[4..8] == b"ftyp" {
         return Some("m4a");
     }
     None
@@ -764,7 +771,7 @@ impl VoiceError {
             VoiceError::TooLarge => problem(StatusCode::PAYLOAD_TOO_LARGE, "voice max 5MB"),
             VoiceError::NotAudio => problem(
                 StatusCode::BAD_REQUEST,
-                "not a supported audio file (mp3, ogg/opus, webm/opus, m4a/aac)",
+                "unsupported audio: mp3, ogg, webm or m4a required",
             ),
             VoiceError::Full => problem(StatusCode::INSUFFICIENT_STORAGE, "voice storage full"),
             VoiceError::Storage => problem(StatusCode::SERVICE_UNAVAILABLE, "voice storage failed"),
@@ -1168,4 +1175,21 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sniff_audio;
+
+    #[test]
+    fn sniff_audio_maps_browser_recordings() {
+        assert_eq!(sniff_audio(b"ID3\x04\x00\x00\x00\x00"), Some("mp3"));
+        assert_eq!(sniff_audio(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
+        assert_eq!(sniff_audio(b"OggS\x00\x02\x00\x00"), Some("ogg"));
+        assert_eq!(sniff_audio(&[0x1A, 0x45, 0xDF, 0xA3, 0x9F]), Some("webm"));
+        assert_eq!(sniff_audio(b"\x00\x00\x00\x20ftypM4A "), Some("m4a"));
+        assert_eq!(sniff_audio(b"RIFF\x00\x00\x00\x00WAVE"), None);
+        assert_eq!(sniff_audio(b"\x00\x00\x00\x20ft"), None, "truncated ftyp");
+        assert_eq!(sniff_audio(b"ID"), None);
+    }
 }
