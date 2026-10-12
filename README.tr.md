@@ -6,10 +6,22 @@ Yarım kalmış yan projeleri takas edilebilir quest'lere çevir. Yoruldun mu? D
 
 Başarı kriteri: tanımadığın insanların açık havuzda takas yapması.
 
+## Durum (2026-10-12)
+
+| Parça | Durum |
+|---|---|
+| REST API (`/v1/`), Postgres şeması, auth, ses yükleme | Bitti, 45 test yeşil (16 birim + 29 entegrasyon) |
+| B: outbox publisher + `bot` binary (log / Discord webhook) | Bitti |
+| C: `EmbeddingMatcher` (yerel trigram + kosinüs, `?algo=embedding`) | Bitti |
+| Web arayüzü (Askama + HTMX) | **Yapılmadı.** Sadece yer tutucu bir ana sayfa var. |
+| Deploy | **Yayında değil.** `Dockerfile` ve `fly.toml` hazır. |
+
+API bir arayüz için neredeyse hazır. Arayüzü engelleyen dört eksik hâlâ var; bkz. [docs/plan.tr.md](./docs/plan.tr.md#faz-5--web-arayüzü-açık).
+
 ## Kapsam (MVP = A)
 
 1. Yalın web borsası. Önce A yapılır.
-2. B (Discord/Telegram botu) ve C (AI eşleşme) sonradan takılır, core değişmez.
+2. B (bot bildirimleri) ve C (daha akıllı eşleşme) sonradan takılır, core değişmez.
 3. Her türlü proje: kod, yazı, tasarım. Tip alanı yok, link + ses var.
 
 ## Mimari
@@ -18,56 +30,76 @@ Tek repo, Rust ile API-first modüler monolit. Mikroservis yok.
 
 ```text
 [Web UI - Askama+HTMX] -> [API Core - Axum] -> [Postgres+sqlx]
-[Bot] -----------------> [API Core - Axum] (ileride, aynı API)
+[bot binary] ----------> [outbox_events tablosu] (aynı DB'yi yoklar)
 ```
 
-- Core dış dünyayı bilmez. Web de bot da aynı REST'i kullanır (`/v1/`).
-- Eşleşme tek trait: `trait Matcher { fn match(...) -> ranked_list }`. Şimdi kural-tabanlı, sonra `EmbeddingMatcher` impl.
-- Event: `swap.created` için basit DB outbox tablosu. Bot bildirimi ve AI yeniden-sıralama bunu dinler.
-- Auth: email magic link. Dosya: link (S3 yok). Ses: `./data/voice` içinde 30sn mp3.
+- Core dış dünyayı bilmez. Web arayüzü de gelecekteki diğer istemciler de aynı REST'i kullanır (`/v1/`).
+- Eşleşme tek trait'tir: `trait Matcher { fn match_items(user, pool) -> Vec<RankedItem> }`. İki uygulaması var: `RuleMatcher` (varsayılan) ve `EmbeddingMatcher`.
+- Olaylar bir outbox tablosundan (`outbox_events`) geçer. Bırakma `swap.created`, tamamlanan takas `swap.completed` yazar. Bunları `bot` binary'si iletir.
+- Auth: e-posta magic link + HMAC imzalı oturum cookie'si. Dosya: sadece link (S3 yok). Ses: `VOICE_DIR` altında mp3.
 
-## Altyapı (kilitli - Rust)
+Detay: [docs/design.tr.md](./docs/design.tr.md) · [docs/stack.tr.md](./docs/stack.tr.md) · [docs/plan.tr.md](./docs/plan.tr.md) · [docs/web-ui.tr.md](./docs/web-ui.tr.md) · API sözleşmesi: [docs/openapi.yaml](./docs/openapi.yaml)
 
-- Web + API: Axum + Askama + HTMX, tek binary
-- DB: Postgres + sqlx, pgvector rezerve
-- Auth: magic link (lettre) + cookie session
-- Ses: local static dosya
-- Deploy: Docker + Fly.io
-
-Detay: [docs/stack.tr.md](./docs/stack.tr.md) | [English](./docs/stack.md)
-
-## Dökümanlar
-
-- Tasarım (TR): [docs/design.tr.md](./docs/design.tr.md)
-- Plan (TR): [docs/plan.tr.md](./docs/plan.tr.md)
-- Design (EN): [docs/design.md](./docs/design.md)
-- Plan (EN): [docs/plan.md](./docs/plan.md)
+English: [design.md](./docs/design.md) · [stack.md](./docs/stack.md) · [plan.md](./docs/plan.md) · [web-ui.md](./docs/web-ui.md)
 
 ## API
 
-| Metod | Yol | Not |
-|---|---|---|
-| GET | `/`, `/health`, `/ready` | ana sayfa, canlılık+db, readiness probu |
-| GET | `/v1/projects?cursor=&limit=` | OPEN havuz, cursor sayfalı (max 50) |
-| POST | `/v1/projects` | bırakma: validasyon, günde 3, IP başına 10/dk |
-| POST | `/v1/users/upsert` | eşleşme için yetenek profili (login) |
-| GET | `/v1/match?user_id=` | top-3 + 1 sürpriz (RuleMatcher) |
-| POST | `/v1/swaps` | atomik takas; `Idempotency-Key` opsiyonel (login) |
-| GET | `/v1/revive?user_id=` | freeze paketi + ilk 2dk görevi |
-| POST | `/v1/reports` | 3 farklı report oto-gizler (login) |
-| GET | `/voice/*` | local mp3 dosyaları |
-| POST | `/v1/auth/request` | magic-link e-postası (15dk token) |
-| POST | `/v1/auth/callback` | token → HttpOnly session cookie |
-| POST | `/v1/auth/logout` | session'ı yok et (idempotent) |
-| GET | `/v1/me` | session kimliği (cookiesiz 401) |
-| POST | `/v1/voice` | mp3 yükleme, 5MB cap (login) |
+Login, geçerli bir `qd_session` cookie'si demek. `auth/callback` ve `auth/logout` dışındaki her POST, IP başına dakikada 10 istekle sınırlı.
 
-## Hızlı Başlangıç (5 dk)
+| Metod | Yol | Login | Not |
+|---|---|---|---|
+| GET | `/` | – | açık havuz sayısını gösteren yer tutucu HTML ana sayfa |
+| GET | `/health` | – | her zaman 200, `{"status":"ok","db":"up"\|"down"}` |
+| GET | `/ready` | – | DB cevap verirse 200, yoksa 503 |
+| GET | `/v1/projects?cursor=&limit=` | – | OPEN havuz, yeniden eskiye, cursor sayfalı (varsayılan 20, max 50) |
+| POST | `/v1/projects` | – | quest bırak; `handle` + `email` gövdede gider; herhangi bir 24 saatte bırakan başına max 3 |
+| POST | `/v1/users/upsert` | ✔ | kendi yetenek profilin (`can_do`, `looking_for`) |
+| GET | `/v1/match?user_id=&algo=` | – | top-3 + 1 sürpriz; `algo=rule` (varsayılan) veya `embedding` |
+| POST | `/v1/swaps` | ✔ | iki teklifin atomik, iki yönlü takası; `Idempotency-Key` opsiyonel |
+| GET | `/v1/revive?user_id=` | – | tamamlanan her alma, freeze paketi + ilk 2 dakika göreviyle |
+| POST | `/v1/reports` | ✔ | farklı kullanıcılardan gelen 3 report projeyi kapatır |
+| POST | `/v1/auth/request` | – | login linki e-postalar (15 dk tek kullanımlık token) |
+| POST | `/v1/auth/callback` | – | token'ı kullanır, oturum cookie'sini kurar (30 gün) |
+| POST | `/v1/auth/logout` | – | oturumu siler (idempotent) |
+| GET | `/v1/me` | ✔ | oturum kimliği |
+| POST | `/v1/voice` | ✔ | mp3 yükleme (multipart alanı `file`, 5 MB sınır) |
+| GET | `/voice/*` | – | kayıtlı mp3 dosyaları |
+
+Hatalar RFC 9457 problem JSON'u. Bilinmeyen yol JSON 404, yanlış metod JSON 405 döner; sondaki `/` 308 ile yönlenir.
+
+## Hızlı Başlangıç
 
 ```bash
-cp .env.example .env   # DATABASE_URL'e erişilebilir bir Postgres yaz
+cp .env.example .env   # DATABASE_URL'e erişilebilir bir Postgres (13+) yaz
 cargo run              # migration'lar açılışta otomatik koşar
 ```
 
-`http://localhost:3000` aç, health `/health` adresinde (`db` durumuyla).
-Veritabanı yoksa sunucu degrade çalışır: havuz boş, yazmalar 503 döner.
+`http://localhost:3000` aç; `/health` DB durumunu gösterir. Veritabanı yoksa sunucu yine açılır: havuz boş görünür, yazmalar 503 döner.
+
+`SMTP_URL` yoksa login linki gelen kutusu yerine loga yazılır (`RUST_LOG=questdrop=info` ile görünür).
+
+Bot (outbox iletimi): `cargo run --bin bot`.
+
+## Testler
+
+```bash
+TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/questdrop_test" cargo test
+```
+
+Entegrasyon testleri her tabloyu `TRUNCATE` eder. Veritabanı adresinde `test` geçmiyorsa çalışmayı reddeder.
+
+## Yapılandırma
+
+| Değişken | Varsayılan | Anlamı |
+|---|---|---|
+| `DATABASE_URL` | – | Postgres adresi; yoksa degrade mod |
+| `PORT` | `3000` | dinleme portu |
+| `VOICE_DIR` | `./data/voice` | mp3 klasörü |
+| `VOICE_QUOTA_MB` | `500` | klasör bu boyuta ulaşınca yükleme reddedilir (507) |
+| `SESSION_SECRET` | her açılışta rastgele | en az 16 karakter; production'da şart, yoksa yeniden başlatınca oturumlar düşer |
+| `BASE_URL` | `http://localhost:3000` | login linklerinin tabanı; `https://` ise cookie'ye `Secure` eklenir |
+| `SMTP_URL` / `MAIL_FROM` | – / `questdrop@localhost` | gerçek e-posta; yoksa log mailer |
+| `RUST_LOG` | `questdrop=warn,tower_http=warn` | log filtresi |
+| `BOT_SINK` / `BOT_WEBHOOK_URL` | `log` / – | sadece bot: `webhook` Discord webhook'una yollar |
+| `PUBLISHER_INTERVAL_SECS` | `5` | sadece bot: yoklama aralığı |
+| `TEST_DATABASE_URL` | – | sadece testler |

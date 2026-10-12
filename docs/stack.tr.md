@@ -2,22 +2,23 @@
 
 # Altyapı — Kilitli (Rust)
 
-Tarih: 2026-09-15
+Tarih: 2026-09-15 · Kodla son karşılaştırma: 2026-10-12
 
 ## Karar
 
-- Web + API: Axum (Rust), `/v1/` altında REST. Askama + HTMX ile server-render, Node yok. Tek repo, tek binary. Bot sonradan aynı endpointleri kullanır.
-- DB: Postgres + sqlx. Row-lock takas transaction + outbox tablosu. `embedding` şimdilik JSONB placeholder; gerçek pgvector kolonu C fazıyla gelir.
-- Auth: email magic link YAPILDI (15dk tek-kullanımlık token, HMAC session, varsayılan LogMailer / SMTP_URL ile SMTP). Takas, report ve profil login ister; bırakma açık.
-- Ses depolama: MVP'de local `./data/voice`, static serve ile `voice_url`. S3 kurulumu yok. API değişmeden sonradan S3-uyumluya taşınır.
-- Deploy: Docker tek binary + Fly.io (herhangi bir Docker host olur).
-- API sözleşmesi: [openapi.yaml](./openapi.yaml) (elde yazıldı, kodu aynalar), RFC 9457 hatalar, swap'te `Idempotency-Key`, cursor sayfalama.
+- Web + API: Axum 0.7 (Rust), `/v1/` altında REST. Askama + HTMX ile server-render, Node yok. Tek repo, tek binary. **Şimdiye kadar tek bir Askama şablonu var (`templates/index.html`), HTMX henüz yüklenmiyor**; bkz. [plan.tr.md faz 5](./plan.tr.md#faz-5--web-arayüzü-açık).
+- DB: Postgres 13+ (yerleşik `gen_random_uuid()` kullanılır) + sqlx 0.8, sadece çalışma zamanı sorgularıyla; derlemek için veritabanı gerekmez. `migrations/` açılışta koşar. Row-lock takas transaction + outbox tablosu. `embedding` kullanılmayan bir JSONB yer tutucu; ileride yerine pgvector kolonu gelebilir. C fazının v1'i onu kullanmıyor.
+- Auth: e-posta magic link (15 dk tek kullanımlık token, HMAC imzalı 30 günlük oturum, varsayılan LogMailer, `SMTP_URL` ile SMTP). Takas, report, profil düzenleme ve ses yükleme login ister; bırakma açık.
+- Ses depolama: yerel `VOICE_DIR` (varsayılan `./data/voice`), `/voice/*` altında sunulur. Dosya başına 5 MB, toplam `VOICE_QUOTA_MB` (varsayılan 500). S3 yok. API değişmeden ileride S3-uyumlu depoya taşınabilir.
+- Deploy: `questdrop` binary'sini içeren Docker imajı (digest-pinli `rust:1.90-slim` build → `debian:bookworm-slim`, root olmayan kullanıcı). `fly.toml` Fly.io'yu hedefler (`fra`, `/ready` kontrolü), ama herhangi bir Docker host olur. **Henüz yayında değil.** `bot` binary'si imajda yok.
+- API sözleşmesi: [openapi.yaml](./openapi.yaml) (elle yazıldı, kodu aynalar), RFC 9457 hatalar, swap'te `Idempotency-Key`, cursor sayfalama.
+- Varsayılanlar: 10 sn istek zaman aşımı, 2 MB gövde sınırı (Axum varsayılanı, sadece `/v1/voice`'ta kaldırılır), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, 5 sn Postgres statement timeout, 5 bağlantılık havuz.
 
 ## Neden
 
-- Modüler monolit korunur: B/C aynı REST + outbox'a takılır, core değişmez.
-- sqlx transaction atomik takası kapsar (iki teklif -> matched), `SELECT ... FOR UPDATE` ile.
-- pgvector C fazıyla gelir; o zamana kadar `EmbeddingMatcher: Matcher` impl için trait sabit.
+- Modüler monolit korundu: B ve C, core değişmeden aynı REST + outbox'a takıldı.
+- sqlx transaction atomik takası (iki teklif → MATCHED) `SELECT ... FOR UPDATE` ile kapsar.
+- `Matcher` trait'i sabit; ileride pgvector tabanlı bir matcher, çağıranlara dokunmadan yerel `EmbeddingMatcher`'ın yerine geçebilir.
 
 ## Kapsam Dışı
 

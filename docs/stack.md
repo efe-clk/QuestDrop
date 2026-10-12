@@ -2,22 +2,23 @@
 
 # Stack — Locked (Rust)
 
-Date: 2026-09-15
+Date: 2026-09-15 · Last checked against the code: 2026-10-12
 
 ## Decision
 
-- Web + API: Axum (Rust), REST under `/v1/`. Server-rendered Askama + HTMX, no Node. One repo, one binary. Bot reuses the same endpoints later.
-- DB: Postgres + sqlx. Row-lock swap transaction + outbox table. `embedding` is a JSONB placeholder for now; real pgvector column arrives with phase C.
-- Auth: email magic link IMPLEMENTED (15-min single-use tokens, HMAC sessions, LogMailer default / SMTP via SMTP_URL). Swaps, reports and profile edits require login; drops stay open intake.
-- Voice storage: local `./data/voice` in MVP, served static as `voice_url`. No S3 setup. Moves to S3-compatible later without API change.
-- Deploy: Docker single binary + Fly.io (any Docker host works).
+- Web + API: Axum 0.7 (Rust), REST under `/v1/`. Server-rendered Askama + HTMX, no Node. One repo, one binary. **So far only one Askama template exists (`templates/index.html`) and HTMX is not loaded yet**; see [plan.md phase 5](./plan.md#phase-5--web-ui-open).
+- DB: Postgres 13+ (uses built-in `gen_random_uuid()`) + sqlx 0.8 with runtime queries only, so building needs no database. Migrations in `migrations/` run on boot. Row-lock swap transaction + outbox table. `embedding` is an unused JSONB placeholder; a pgvector column can replace it later. Phase C v1 does not use it.
+- Auth: email magic link (15-min single-use tokens, HMAC-signed 30-day sessions, LogMailer by default, SMTP via `SMTP_URL`). Swaps, reports, profile edits and voice uploads need login; drops stay open intake.
+- Voice storage: local `VOICE_DIR` (default `./data/voice`), served at `/voice/*`. 5 MB per file, `VOICE_QUOTA_MB` total (default 500). No S3. It can move to S3-compatible storage later without an API change.
+- Deploy: Docker image with the `questdrop` binary (digest-pinned `rust:1.90-slim` build → `debian:bookworm-slim`, non-root user). `fly.toml` targets Fly.io (`fra`, `/ready` check), but any Docker host works. **Not deployed yet.** The `bot` binary is not in the image.
 - API contract: [openapi.yaml](./openapi.yaml) (hand-written, mirrors the code), RFC 9457 errors, `Idempotency-Key` on swap, cursor pagination.
+- Defaults: 10 s request timeout, 2 MB body limit (Axum default, lifted only on `/v1/voice`), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, 5 s Postgres statement timeout, pool of 5 connections.
 
 ## Why
 
-- Modular monolith stays intact: B/C plug into the same REST + outbox, no core change.
-- sqlx transaction covers atomic swap (two offers -> matched) with `SELECT ... FOR UPDATE`.
-- pgvector arrives with phase C; until then the `Matcher` trait stays fixed for the future `EmbeddingMatcher` impl.
+- Modular monolith stays intact: B and C plugged into the same REST + outbox without core changes.
+- An sqlx transaction covers the atomic swap (two offers → MATCHED) with `SELECT ... FOR UPDATE`.
+- The `Matcher` trait stays fixed, so a future pgvector-backed matcher can replace the local `EmbeddingMatcher` without touching callers.
 
 ## Non-goals
 
