@@ -15,7 +15,7 @@ Success criterion: strangers trading in the open pool.
 | C: `EmbeddingMatcher` (local trigram + cosine, `?algo=embedding`) | Done |
 | Web UI (Askama + HTMX, English + Turkish) | Done: pool, login, drop with in-browser voice recording, match, swap, revive, profile, report |
 | Tests | 64 Rust tests green (25 unit + 31 API + 8 web) plus a Playwright browser E2E |
-| Deploy | **Not deployed.** `Dockerfile` and `fly.toml` are ready. |
+| Deploy | **Not deployed.** Ready for Coolify (`docker-compose.yml`, see below) and Fly (`fly.toml`). |
 
 The web UI follows [docs/web-ui.md](./docs/web-ui.md); every page works without JavaScript and HTMX only speeds it up.
 
@@ -83,6 +83,17 @@ Open `http://localhost:3000`; `/health` shows the DB state. Without a database t
 Without `SMTP_URL` the login link goes to the server log (at warn level, so it shows with the default filter) instead of an inbox.
 
 Bot (outbox delivery): `cargo run --bin bot`.
+
+## Deploy on Coolify
+
+`docker-compose.yml` is a complete Coolify stack: app, `bot` (outbox worker) and Postgres 16 with persistent volumes.
+
+1. In Coolify: **+ New** → pick this repository → set **Build Pack** to **Docker Compose** (file: `/docker-compose.yml`).
+2. **Deploy.**
+
+Coolify generates everything else: the public URL (`SERVICE_URL_QUESTDROP_3000`, routed to port 3000, also used as `BASE_URL`), the Postgres user and password, and `SESSION_SECRET`. Migrations run on boot. The app waits for a healthy Postgres and reports healthy only once `/ready` answers.
+
+Optional variables (Coolify lists them under **Environment Variables**): `SMTP_URL` and `MAIL_FROM` for real login emails (without them the login link only goes to the server log), `BOT_SINK=webhook` and `BOT_WEBHOOK_URL` for Discord, `VOICE_QUOTA_MB`, `RUST_LOG`. To use your own domain, set it under **Domains** for the `questdrop` service as `https://your.domain:3000`.
 
 ## Tests
 

@@ -15,7 +15,7 @@ Başarı kriteri: tanımadığın insanların açık havuzda takas yapması.
 | C: `EmbeddingMatcher` (yerel trigram + kosinüs, `?algo=embedding`) | Bitti |
 | Web arayüzü (Askama + HTMX, Türkçe + İngilizce) | Bitti: havuz, giriş, tarayıcıdan ses kaydıyla bırakma, eşleşme, takas, canlandırma, profil, şikâyet |
 | Testler | 64 Rust testi yeşil (25 birim + 31 API + 8 web) ve Playwright tarayıcı E2E'si |
-| Deploy | **Yayında değil.** `Dockerfile` ve `fly.toml` hazır. |
+| Deploy | **Yayında değil.** Coolify (`docker-compose.yml`, aşağıda) ve Fly (`fly.toml`) için hazır. |
 
 Web arayüzü [docs/web-ui.tr.md](./docs/web-ui.tr.md)'yi izler; her sayfa JavaScript olmadan çalışır, HTMX sadece hızlandırır.
 
@@ -83,6 +83,17 @@ cargo run              # migration'lar açılışta otomatik koşar
 `SMTP_URL` yoksa login linki gelen kutusu yerine sunucu loguna yazılır (warn seviyesinde, varsayılan filtreyle görünür).
 
 Bot (outbox iletimi): `cargo run --bin bot`.
+
+## Coolify ile Yayına Alma
+
+`docker-compose.yml` eksiksiz bir Coolify yığınıdır: uygulama, `bot` (outbox işçisi) ve kalıcı volume'lu Postgres 16.
+
+1. Coolify'da: **+ New** → bu repoyu seç → **Build Pack** olarak **Docker Compose** seç (dosya: `/docker-compose.yml`).
+2. **Deploy.**
+
+Gerisini Coolify kendisi üretir: genel URL (`SERVICE_URL_QUESTDROP_3000`, 3000 portuna yönlenir, `BASE_URL` olarak da kullanılır), Postgres kullanıcı adı ve şifresi, `SESSION_SECRET`. Migration'lar açılışta çalışır. Uygulama Postgres sağlıklı olana kadar bekler ve ancak `/ready` yanıt verince sağlıklı görünür.
+
+İsteğe bağlı değişkenler (Coolify bunları **Environment Variables** altında listeler): gerçek giriş e-postaları için `SMTP_URL` ve `MAIL_FROM` (bunlar olmadan giriş bağlantısı yalnızca sunucu loguna düşer), Discord için `BOT_SINK=webhook` ve `BOT_WEBHOOK_URL`, `VOICE_QUOTA_MB`, `RUST_LOG`. Kendi alan adını kullanmak için **Domains** altında `questdrop` servisine `https://alan.adin:3000` gir.
 
 ## Testler
 
